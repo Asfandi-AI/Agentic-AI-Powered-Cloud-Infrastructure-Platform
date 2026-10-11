@@ -159,3 +159,28 @@ def test_component_is_frozen() -> None:
 
     with pytest.raises(ValidationError):
         bucket.description = "changed"
+
+
+def test_register_rejects_an_unknown_replacement_forcing_option() -> None:
+    bucket, _queue = _starters()
+    component = bucket.model_copy(
+        update={"replacement_forcing_options": frozenset({"versioning"})}
+    )
+
+    with pytest.raises(CatalogError, match="versioning"):
+        Catalog().register(component)
+
+
+def test_catalog_version_changes_when_replacement_forcing_options_change() -> None:
+    bucket, queue = _starters()
+    base = bucket.model_copy(update={"options_model": _OptionsWithVersioning})
+    flagged = base.model_copy(
+        update={"replacement_forcing_options": frozenset({"versioning"})}
+    )
+
+    assert _version_of(flagged, queue) != _version_of(base, queue)
+
+
+def test_starter_components_have_no_replacement_forcing_options() -> None:
+    for component in build_catalog().list_components():
+        assert component.replacement_forcing_options == frozenset()

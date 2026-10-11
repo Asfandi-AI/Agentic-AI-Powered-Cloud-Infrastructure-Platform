@@ -43,6 +43,7 @@ class Component(BaseModel):
     deletion_behaviour: DeletionBehaviour
     permissions: tuple[str, ...]
     untaggable_resource_types: tuple[str, ...] = ()
+    replacement_forcing_options: frozenset[str] = frozenset()
 
     @model_validator(mode="after")
     def _reject_missing_tags(self) -> Self:

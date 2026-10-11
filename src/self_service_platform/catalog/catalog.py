@@ -41,6 +41,7 @@ class Catalog:
             )
         if component.component_type in self._components:
             raise CatalogError(f"duplicate component_type {component.component_type}")
+        _reject_unknown_replacement_options(component)
         self._components[component.component_type] = component
 
     def get(self, component_type: str) -> Component:
@@ -110,9 +111,18 @@ def _definition(component: Component) -> dict[str, object]:
         "description": component.description,
         "options_schema": component.options_model.model_json_schema(),
         "permissions": list(component.permissions),
+        "replacement_forcing_options": sorted(component.replacement_forcing_options),
         "required_tags": sorted(component.required_tags),
         "untaggable_resource_types": list(component.untaggable_resource_types),
     }
+
+
+def _reject_unknown_replacement_options(component: Component) -> None:
+    fields = set(component.options_model.model_fields)
+    unknown = sorted(component.replacement_forcing_options - fields)
+    if unknown:
+        names = ", ".join(unknown)
+        raise CatalogError(f"unknown replacement-forcing option {names}")
 
 
 def _canonicalize(value: object) -> Json:
