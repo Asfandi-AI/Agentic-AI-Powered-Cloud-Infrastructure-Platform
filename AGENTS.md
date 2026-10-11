@@ -19,4 +19,4 @@ Project spec: docs/requirements.md. Read it before any task.
 - Never commit secrets, keys or .env files.
 
 ## Layout
-src/self_service_platform/{core,catalog,executors,cli}/ and tests/
+src/self_service_platform/{core,catalog,executors,cli,registry}/ and tests/
