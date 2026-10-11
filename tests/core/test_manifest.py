@@ -161,3 +161,16 @@ def test_root_that_is_not_a_list_raises_manifest_load_error(text: str) -> None:
 def test_wrong_field_types_raise_manifest_load_error(text: str) -> None:
     with pytest.raises(ManifestLoadError):
         load_manifest_from_string(text)
+
+
+def test_python_object_apply_tag_raises_manifest_load_error_and_does_not_execute(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    text = '- !!python/object/apply:os.system ["echo hacked"]\n'
+
+    with pytest.raises(ManifestLoadError):
+        load_manifest_from_string(text)
+
+    captured = capfd.readouterr()
+    assert "hacked" not in captured.out
+    assert "hacked" not in captured.err
