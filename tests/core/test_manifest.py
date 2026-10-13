@@ -65,6 +65,17 @@ def test_load_manifest_from_file_reads_a_valid_yaml_list(tmp_path: Path) -> None
     assert manifest.root == EXPECTED_ENTRIES
 
 
+def test_load_manifest_from_file_reads_utf8_with_a_byte_order_mark(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_bytes(b"\xef\xbb\xbf" + VALID_MANIFEST.encode("utf-8"))
+
+    manifest = load_manifest_from_file(path)
+
+    assert manifest.root == EXPECTED_ENTRIES
+
+
 def test_load_manifest_from_file_rejects_malformed_yaml(tmp_path: Path) -> None:
     path = tmp_path / "manifest.yaml"
     path.write_text("- type: [\n", encoding="utf-8")

@@ -33,7 +33,7 @@ class Manifest(
 
 
 def load_manifest_from_file(path: Path) -> Manifest:
-    return load_manifest_from_string(path.read_text(encoding="utf-8"))
+    return load_manifest_from_string(path.read_text(encoding="utf-8-sig"))
 
 
 def load_manifest_from_string(text: str) -> Manifest:
