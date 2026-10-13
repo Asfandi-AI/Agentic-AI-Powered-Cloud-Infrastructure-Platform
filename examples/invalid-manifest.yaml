@@ -1,0 +1,6 @@
+- type: no-such-type
+  name: uploads
+- type: s3-bucket
+  name: jobs
+  options:
+    foo: 1
