@@ -34,6 +34,10 @@ Requirement 8.2's CLI arguments are not in this repo, so `ssp` is built from scr
 
 The currency or unit of amounts is not specified.
 
+## Diff confirmation
+
+Confirmations for removals and replacements (Requirements 4.3 and 4.9) are not implemented because `diff` only reports.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).

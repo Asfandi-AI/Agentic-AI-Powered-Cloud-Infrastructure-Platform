@@ -56,6 +56,16 @@ POC heuristic
 ```
 
 ```text
+uv run ssp diff examples/valid-manifest.yaml examples/updated-manifest.yaml
+```
+
+```text
+added: reports sqs-queue
+removed: jobs sqs-queue (data in this component will be deleted)
+summary: 1 added, 1 removed, 0 changed
+```
+
+```text
 uv run ssp validate examples/invalid-manifest.yaml
 ```
 
@@ -73,7 +83,7 @@ position 1 uploads: unknown component type no-such-type
 position 2 jobs: unknown option foo
 ```
 
-The two commands on examples/invalid-manifest.yaml print those issues and exit with status 1. The issues are printed on stderr and the exit code is 1.
+The two commands on examples/invalid-manifest.yaml print those issues on stderr and exit with status 1.
 
 ## Status
 
@@ -82,10 +92,10 @@ Built and usable from the CLI:
 - catalog
 - validate
 - estimate
+- Manifest diff
 
 Built as library code, not yet reachable from the CLI:
 
-- Manifest diff
 - A tenant registry stored in SQLite
 - An executor port with an in-memory fake
 

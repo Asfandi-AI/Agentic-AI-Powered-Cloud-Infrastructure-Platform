@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 from pydantic import BaseModel, ConfigDict
 from typer.testing import CliRunner, Result
 
@@ -64,6 +65,53 @@ def _priced_catalog() -> Catalog:
         )
     )
     return catalog
+
+
+class _BucketOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    versioning: bool = False
+    encryption: bool = False
+
+
+class _QueueOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def _diff_catalog() -> Catalog:
+    catalog = Catalog()
+    catalog.register(
+        Component(
+            component_type="versioned-bucket",
+            description="A bucket",
+            aws_service=AwsService.S3,
+            options_model=_BucketOptions,
+            cost_line_items=(CostLineItem(description="storage", amount=None),),
+            required_tags=REQUIRED_TAG_KEYS,
+            deletion_behaviour=DeletionBehaviour.DELETE,
+            permissions=("s3:TestAction",),
+            replacement_forcing_options=frozenset({"versioning"}),
+        )
+    )
+    catalog.register(
+        Component(
+            component_type="sqs-queue",
+            description="A queue",
+            aws_service=AwsService.SQS,
+            options_model=_QueueOptions,
+            cost_line_items=(CostLineItem(description="requests", amount=None),),
+            required_tags=REQUIRED_TAG_KEYS,
+            deletion_behaviour=DeletionBehaviour.DELETE,
+            permissions=("sqs:TestAction",),
+        )
+    )
+    return catalog
+
+
+def _write_as(tmp_path: Path, name: str, text: str) -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def _unpriced_catalog() -> Catalog:
@@ -454,3 +502,551 @@ def test_command_output_is_pure_ascii(tmp_path: Path) -> None:
         assert result.stdout.isascii()
         assert result.stderr.isascii()
         assert result.output.isascii()
+
+
+_DATA_LOSS = "(data in this component will be deleted)"
+
+
+def test_diff_with_differences_exits_0(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: jobs
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: reports
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert "added:" in result.stdout
+    assert result.stderr == ""
+
+
+def test_diff_prints_added_removed_changed_then_summary(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            - type: sqs-queue
+              name: jobs
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                versioning: true
+            - type: sqs-queue
+              name: reports
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "added: reports sqs-queue\n"
+        f"removed: jobs sqs-queue {_DATA_LOSS}\n"
+        "changed: uploads versioned-bucket options: versioning [REPLACEMENT]\n"
+        "summary: 1 added, 1 removed, 1 changed\n"
+    )
+    assert result.stderr == ""
+
+
+def test_diff_type_change_is_removed_and_added(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: uploads
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "added: uploads sqs-queue\n"
+        f"removed: uploads versioned-bucket {_DATA_LOSS}\n"
+        "summary: 1 added, 1 removed, 0 changed\n"
+    )
+    assert "changed:" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_diff_data_loss_text_is_only_on_removed_lines(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: jobs
+            - type: sqs-queue
+              name: archive
+            - type: versioned-bucket
+              name: uploads
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                encryption: true
+            - type: sqs-queue
+              name: reports
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    lines = result.stdout.splitlines()
+    removed = [line for line in lines if line.startswith("removed:")]
+    added = [line for line in lines if line.startswith("added:")]
+    changed = [line for line in lines if line.startswith("changed:")]
+    assert len(removed) == 2
+    assert len(added) == 1
+    assert len(changed) == 1
+    assert all(_DATA_LOSS in line for line in removed)
+    assert all(_DATA_LOSS not in line for line in added)
+    assert all(_DATA_LOSS not in line for line in changed)
+    assert result.stderr == ""
+
+
+def test_diff_summary_counts_two_added_and_one_removed(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            - type: sqs-queue
+              name: jobs
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            - type: sqs-queue
+              name: reports
+            - type: sqs-queue
+              name: archive
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "added: reports sqs-queue\n"
+        "added: archive sqs-queue\n"
+        f"removed: jobs sqs-queue {_DATA_LOSS}\n"
+        "summary: 2 added, 1 removed, 0 changed\n"
+    )
+    assert result.stderr == ""
+
+
+def test_diff_names_the_changed_option(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                encryption: true
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert "options: encryption" in result.stdout
+    assert result.stderr == ""
+
+
+def test_diff_replacement_forcing_change_shows_marker(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                versioning: true
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "changed: uploads versioned-bucket options: versioning [REPLACEMENT]\n"
+        "summary: 0 added, 0 removed, 1 changed\n"
+    )
+    assert result.stderr == ""
+
+
+def test_diff_non_forcing_change_omits_marker(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                encryption: true
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "changed: uploads versioned-bucket options: encryption\n"
+        "summary: 0 added, 0 removed, 1 changed\n"
+    )
+    assert "[REPLACEMENT]" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_diff_swapping_arguments_swaps_added_and_removed(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    jobs = _write_as(
+        tmp_path,
+        "jobs.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: jobs
+            """
+        ),
+    )
+    reports = _write_as(
+        tmp_path,
+        "reports.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: reports
+            """
+        ),
+    )
+
+    forward = runner.invoke(app, ["diff", str(jobs), str(reports)])
+    backward = runner.invoke(app, ["diff", str(reports), str(jobs)])
+
+    assert forward.exit_code == 0
+    assert forward.stdout == (
+        "added: reports sqs-queue\n"
+        f"removed: jobs sqs-queue {_DATA_LOSS}\n"
+        "summary: 1 added, 1 removed, 0 changed\n"
+    )
+    assert forward.stderr == ""
+    assert backward.exit_code == 0
+    assert backward.stdout == (
+        "added: jobs sqs-queue\n"
+        f"removed: reports sqs-queue {_DATA_LOSS}\n"
+        "summary: 1 added, 1 removed, 0 changed\n"
+    )
+    assert backward.stderr == ""
+
+
+def test_diff_unreadable_old_file_exits_2(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = tmp_path / "missing.yaml"
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: sqs-queue
+              name: jobs
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    _assert_cannot_read(result, old)
+
+
+def test_diff_output_is_pure_ascii(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            - type: sqs-queue
+              name: jobs
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                versioning: true
+            - type: sqs-queue
+              name: reports
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.stdout.isascii()
+    assert result.stderr.isascii()
+    assert result.output.isascii()
+
+
+_QUEUE_MANIFEST = dedent(
+    """\
+    - type: sqs-queue
+      name: jobs
+    """
+)
+
+
+def test_diff_malformed_old_exits_1_and_names_the_file(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(tmp_path, "old.yaml", "- type: [\n")
+    new = _write_as(tmp_path, "new.yaml", _QUEUE_MANIFEST)
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == f"{old}: malformed YAML\n"
+    assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_diff_malformed_new_exits_1_and_names_the_file(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(tmp_path, "old.yaml", _QUEUE_MANIFEST)
+    new = _write_as(tmp_path, "new.yaml", "- type: [\n")
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == f"{new}: malformed YAML\n"
+    assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_diff_unreadable_new_file_exits_2(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(tmp_path, "old.yaml", _QUEUE_MANIFEST)
+    new = tmp_path / "missing.yaml"
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    _assert_cannot_read(result, new)
+
+
+def test_diff_directory_as_new_exits_2(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(tmp_path, "old.yaml", _QUEUE_MANIFEST)
+    new = tmp_path / "not-a-file"
+    new.mkdir()
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    _assert_cannot_read(result, new)
+
+
+def test_diff_both_invalid_lists_old_issues_then_new(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    def record(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+
+    monkeypatch.setattr("self_service_platform.core.diff.compute_diff", record)
+    monkeypatch.setattr(
+        "self_service_platform.cli.main.compute_diff",
+        record,
+        raising=False,
+    )
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: no-such-type
+              name: uploads
+            - type: versioned-bucket
+              name: jobs
+              options:
+                foo: 1
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: no-such-type
+              name: events
+            - type: sqs-queue
+              name: reports
+              options:
+                extra: 1
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"{old}: position 1 uploads: unknown component type no-such-type\n"
+        f"{old}: position 2 jobs: unknown option foo\n"
+        f"{new}: position 1 events: unknown component type no-such-type\n"
+        f"{new}: position 2 reports: unknown option extra\n"
+    )
+    assert calls == []
+
+
+def test_diff_names_both_changed_options_in_field_order(tmp_path: Path) -> None:
+    app = create_app(_diff_catalog())
+    old = _write_as(
+        tmp_path,
+        "old.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+            """
+        ),
+    )
+    new = _write_as(
+        tmp_path,
+        "new.yaml",
+        dedent(
+            """\
+            - type: versioned-bucket
+              name: uploads
+              options:
+                encryption: true
+                versioning: true
+            """
+        ),
+    )
+
+    result = runner.invoke(app, ["diff", str(old), str(new)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "changed: uploads versioned-bucket options: versioning, encryption [REPLACEMENT]\n"
+        "summary: 0 added, 0 removed, 1 changed\n"
+    )
+    assert result.stdout.count("[REPLACEMENT]") == 1
+    assert result.stderr == ""

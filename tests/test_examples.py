@@ -9,6 +9,7 @@ runner = CliRunner()
 
 _ROOT = Path(__file__).resolve().parents[1]
 _VALID = _ROOT / "examples" / "valid-manifest.yaml"
+_UPDATED = _ROOT / "examples" / "updated-manifest.yaml"
 _INVALID = _ROOT / "examples" / "invalid-manifest.yaml"
 _README = _ROOT / "README.md"
 
@@ -56,6 +57,37 @@ def test_estimate_invalid_example_prints_no_cost() -> None:
     assert "not priced" not in result.stdout
     assert re.search(r"\d", result.stdout) is None
     assert result.stderr == _ISSUE_LINES
+
+
+def test_diff_valid_and_updated_example_prints_added_and_removed() -> None:
+    result = runner.invoke(app, ["diff", str(_VALID), str(_UPDATED)])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "added: reports sqs-queue\n"
+        "removed: jobs sqs-queue (data in this component will be deleted)\n"
+        "summary: 1 added, 1 removed, 0 changed\n"
+    )
+    assert result.stderr == ""
+
+
+def test_diff_same_example_prints_no_changes() -> None:
+    result = runner.invoke(app, ["diff", str(_VALID), str(_VALID)])
+
+    assert result.exit_code == 0
+    assert result.stdout == "no changes\n"
+    assert result.stderr == ""
+
+
+def test_diff_invalid_example_exits_1_with_empty_stdout() -> None:
+    result = runner.invoke(app, ["diff", str(_VALID), str(_INVALID)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"{_INVALID}: position 1 uploads: unknown component type no-such-type\n"
+        f"{_INVALID}: position 2 jobs: unknown option foo\n"
+    )
 
 
 def test_readme_example_paths_exist_on_disk() -> None:
