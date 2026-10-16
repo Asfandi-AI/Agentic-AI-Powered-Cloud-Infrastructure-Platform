@@ -51,6 +51,7 @@ class TenantRecord(BaseModel):
 
     tenant_id: str
     tenant_type: TenantType
+    owner: str
     status: TenantStatus
     manifest: tuple[ManifestEntry, ...]
     catalog_version: str
@@ -58,6 +59,13 @@ class TenantRecord(BaseModel):
     expires_at: datetime | None
     last_error: str | None
     updated_at: datetime
+
+    @field_validator("owner")
+    @classmethod
+    def _owner_present(cls, value: str) -> str:
+        if value.strip() == "":
+            raise ValueError("owner must not be empty")
+        return value
 
     @field_validator("expires_at")
     @classmethod

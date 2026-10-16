@@ -84,6 +84,7 @@ def _record(
     *,
     tenant_id: str = TENANT_ID,
     tenant_type: TenantType = TenantType.DEV,
+    owner: str = "alice",
     status: TenantStatus = TenantStatus.CREATING,
     manifest: tuple[ManifestEntry, ...] = APPLIED_MANIFEST,
     catalog_version: str = "catalog-1",
@@ -98,6 +99,7 @@ def _record(
         status=status,
         manifest=manifest,
         catalog_version=catalog_version,
+        owner=owner,
         initiator=_initiator() if initiator is None else initiator,
         expires_at=expires_at,
         last_error=last_error,
@@ -442,6 +444,51 @@ def test_initiator_is_stored_on_each_transition(tmp_path: Path) -> None:
                 _fields(initiator=initiator, last_error=last_error),
             )
             assert registry.get(TENANT_ID).initiator == initiator
+
+
+def test_owner_stays_the_create_value_across_the_lifecycle(tmp_path: Path) -> None:
+    steps = (
+        (
+            TenantStatus.CREATING,
+            TenantStatus.ACTIVE,
+            _initiator(InitiatorKind.AGENT, "bob"),
+        ),
+        (
+            TenantStatus.ACTIVE,
+            TenantStatus.UPDATING,
+            _initiator(InitiatorKind.CLI, "carol"),
+        ),
+        (
+            TenantStatus.UPDATING,
+            TenantStatus.UPDATE_FAILED,
+            _initiator(InitiatorKind.AGENT, "dave"),
+        ),
+        (
+            TenantStatus.UPDATE_FAILED,
+            TenantStatus.UPDATING,
+            _initiator(InitiatorKind.CLI, "eve"),
+        ),
+        (
+            TenantStatus.UPDATING,
+            TenantStatus.ACTIVE,
+            _initiator(InitiatorKind.AGENT, "frank"),
+        ),
+    )
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T0)) as registry:
+        registry.create_tenant(
+            _record(owner="alice", initiator=_initiator(InitiatorKind.CLI, "zoe"))
+        )
+        assert registry.get(TENANT_ID).owner == "alice"
+        for expected, new, initiator in steps:
+            last_error = "failed" if new == TenantStatus.UPDATE_FAILED else None
+            registry.transition(
+                TENANT_ID,
+                expected,
+                new,
+                _fields(initiator=initiator, last_error=last_error),
+            )
+            assert registry.get(TENANT_ID).owner == "alice"
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,7 @@ def _record(expires_at: datetime | None, updated_at: datetime) -> TenantRecord:
         status=TenantStatus.CREATING,
         manifest=(ManifestEntry(type="s3-bucket", name="uploads", options={}),),
         catalog_version="catalog-1",
+        owner="alice",
         initiator=Initiator(kind=InitiatorKind.CLI, owner="alice"),
         expires_at=expires_at,
         last_error=None,
@@ -62,3 +63,30 @@ def _fields(expires_at: datetime | None) -> TransitionFields:
 def test_naive_datetime_is_rejected(build: Callable[[], object]) -> None:
     with pytest.raises(ValidationError, match="timezone-aware UTC"):
         build()
+
+
+def test_transition_fields_have_no_owner_field() -> None:
+    assert set(TransitionFields.model_fields) == {
+        "catalog_version",
+        "expires_at",
+        "initiator",
+        "last_error",
+        "manifest",
+    }
+
+
+@pytest.mark.parametrize("owner", ["", " ", " \t\n"])
+def test_tenant_record_rejects_a_blank_owner(owner: str) -> None:
+    with pytest.raises(ValidationError):
+        TenantRecord(
+            tenant_id="tenant-a",
+            tenant_type=TenantType.DEV,
+            status=TenantStatus.CREATING,
+            manifest=(ManifestEntry(type="s3-bucket", name="uploads", options={}),),
+            catalog_version="catalog-1",
+            owner=owner,
+            initiator=Initiator(kind=InitiatorKind.CLI, owner="alice"),
+            expires_at=_UTC,
+            last_error=None,
+            updated_at=_UTC,
+        )

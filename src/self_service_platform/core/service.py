@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 from self_service_platform.catalog.catalog import Catalog
 from self_service_platform.core.cost import EstimatedCost, estimate_cost
+from self_service_platform.core.diff import ManifestDiff, compute_diff
 from self_service_platform.core.executor import (
     Executor,
     ExecutorError,
@@ -19,7 +20,12 @@ from self_service_platform.core.tenant import (
     TransitionFields,
     truncate_error,
 )
-from self_service_platform.core.validator import ValidatedManifest, validate_manifest
+from self_service_platform.core.validator import (
+    ManifestValidationError,
+    ManifestValidationIssue,
+    ValidatedManifest,
+    validate_manifest,
+)
 
 
 class ConfirmationRequiredError(Exception):
@@ -59,6 +65,36 @@ class CreateResult(BaseModel):
     record: TenantRecord
 
 
+class UpdateNotAllowedError(Exception):
+    """Raised when the tenant status does not allow an update."""
+
+
+class StoredManifestInvalidError(Exception):
+    """Raised when the stored manifest fails the current catalog."""
+
+    def __init__(self, issues: list[ManifestValidationIssue]) -> None:
+        self.issues = issues
+        detail = "; ".join(
+            f"position {issue.position} {issue.name}: {issue.message}"
+            for issue in issues
+        )
+        super().__init__(detail)
+
+
+class UpdatePlan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str
+    base_manifest: ValidatedManifest
+    new_manifest: ValidatedManifest
+    catalog_version: str
+    diff: ManifestDiff
+    estimated_cost: EstimatedCost
+    nothing_to_change: bool
+    removals: tuple[str, ...]
+    replacements: tuple[str, ...]
+
+
 class PlatformService:
     def __init__(
         self,
@@ -92,6 +128,24 @@ class PlatformService:
             expires_at=self._expires_at(tenant_type),
         )
 
+    def plan_update(self, tenant_id: str, manifest: Manifest) -> UpdatePlan:
+        record = self._registry.get(tenant_id)
+        _require_updatable(record.status)
+        base = self._validated_stored(record.manifest)
+        proposed = validate_manifest(manifest, self._catalog)
+        diff = compute_diff(applied=base, proposed=proposed)
+        return UpdatePlan(
+            tenant_id=tenant_id,
+            base_manifest=base,
+            new_manifest=proposed,
+            catalog_version=self._catalog.catalog_version,
+            diff=diff,
+            estimated_cost=estimate_cost(proposed),
+            nothing_to_change=diff.is_empty,
+            removals=tuple(entry.name for entry in diff.removed),
+            replacements=tuple(entry.name for entry in diff.replacements),
+        )
+
     def apply_create(
         self,
         plan: CreatePlan,
@@ -122,6 +176,16 @@ class PlatformService:
         if expires_at is None or expires_at <= self._clock():
             raise StalePlanError("plan has expired")
 
+    def _validated_stored(
+        self,
+        entries: tuple[ManifestEntry, ...],
+    ) -> ValidatedManifest:
+        stored = Manifest.model_validate([entry.model_dump() for entry in entries])
+        try:
+            return validate_manifest(stored, self._catalog)
+        except ManifestValidationError as exc:
+            raise StoredManifestInvalidError(exc.issues) from exc
+
     def _creating_record(
         self,
         plan: CreatePlan,
@@ -131,6 +195,7 @@ class PlatformService:
         return TenantRecord(
             tenant_id=plan.tenant_id,
             tenant_type=plan.tenant_type,
+            owner=plan.owner,
             status=TenantStatus.CREATING,
             manifest=manifest,
             catalog_version=plan.catalog_version,
@@ -170,6 +235,12 @@ class PlatformService:
                 last_error=None,
             ),
         )
+
+
+def _require_updatable(status: TenantStatus) -> None:
+    if status is TenantStatus.ACTIVE or status is TenantStatus.UPDATE_FAILED:
+        return
+    raise UpdateNotAllowedError(f"cannot update status {status.value}")
 
 
 def _ttl_for(tenant_type: TenantType, policy: TtlPolicy) -> timedelta | None:

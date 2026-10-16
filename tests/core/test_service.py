@@ -3,9 +3,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from self_service_platform.catalog.catalog import Catalog, build_catalog
+from self_service_platform.catalog.component import (
+    REQUIRED_TAG_KEYS,
+    AwsService,
+    Component,
+    CostLineItem,
+    DeletionBehaviour,
+)
 from self_service_platform.core.cost import estimate_cost
+from self_service_platform.core.diff import compute_diff
 from self_service_platform.core.executor import (
     ExecutorError,
     ProvisionRequest,
@@ -18,7 +27,10 @@ from self_service_platform.core.service import (
     PlatformService,
     ProvisionFailedError,
     StalePlanError,
+    StoredManifestInvalidError,
     TtlPolicy,
+    UpdateNotAllowedError,
+    UpdatePlan,
 )
 from self_service_platform.core.tags import MANAGED_BY
 from self_service_platform.core.tenant import (
@@ -33,7 +45,10 @@ from self_service_platform.core.tenant import (
     TransitionFields,
     truncate_error,
 )
-from self_service_platform.core.validator import ManifestValidationError
+from self_service_platform.core.validator import (
+    ManifestValidationError,
+    validate_manifest,
+)
 from self_service_platform.executors.fake import FakeExecutor
 from self_service_platform.registry.sqlite import SqliteRegistry
 
@@ -545,3 +560,391 @@ def test_prod_plan_applies_and_stores_no_expires_at(tmp_path: Path) -> None:
         assert result.record.status is TenantStatus.ACTIVE
         assert result.record.expires_at is None
         assert sqlite.get(TENANT_ID).expires_at is None
+
+
+class _BucketOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    versioning: bool = False
+
+
+class _QueueOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+_TO_STATUS: dict[TenantStatus, tuple[tuple[TenantStatus, TenantStatus], ...]] = {
+    TenantStatus.CREATING: (),
+    TenantStatus.ACTIVE: ((TenantStatus.CREATING, TenantStatus.ACTIVE),),
+    TenantStatus.UPDATING: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.UPDATING),
+    ),
+    TenantStatus.UPDATE_FAILED: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.UPDATING),
+        (TenantStatus.UPDATING, TenantStatus.UPDATE_FAILED),
+    ),
+    TenantStatus.DESTROYING: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+    ),
+}
+
+
+def _replacement_catalog() -> Catalog:
+    catalog = Catalog()
+    catalog.register(
+        Component(
+            component_type="versioned-bucket",
+            description="A bucket",
+            aws_service=AwsService.S3,
+            options_model=_BucketOptions,
+            cost_line_items=(CostLineItem(description="storage", amount=None),),
+            required_tags=REQUIRED_TAG_KEYS,
+            deletion_behaviour=DeletionBehaviour.DELETE,
+            permissions=("s3:TestAction",),
+            replacement_forcing_options=frozenset({"versioning"}),
+        )
+    )
+    catalog.register(
+        Component(
+            component_type="sqs-queue",
+            description="A queue",
+            aws_service=AwsService.SQS,
+            options_model=_QueueOptions,
+            cost_line_items=(CostLineItem(description="requests", amount=None),),
+            required_tags=REQUIRED_TAG_KEYS,
+            deletion_behaviour=DeletionBehaviour.DELETE,
+            permissions=("sqs:TestAction",),
+        )
+    )
+    return catalog
+
+
+def _seed(
+    sqlite: SqliteRegistry,
+    *,
+    status: TenantStatus,
+    manifest: tuple[ManifestEntry, ...],
+    catalog_version: str,
+    owner: str = "alice",
+) -> TenantRecord:
+    sqlite.create_tenant(
+        TenantRecord(
+            tenant_id=TENANT_ID,
+            tenant_type=TenantType.DEV,
+            status=TenantStatus.CREATING,
+            manifest=manifest,
+            catalog_version=catalog_version,
+            owner=owner,
+            initiator=_initiator(),
+            expires_at=T0 + DEV_TTL,
+            last_error=None,
+            updated_at=T0,
+        )
+    )
+    current = sqlite.get(TENANT_ID)
+    for expected, new in _TO_STATUS[status]:
+        last_error = "provision failed" if new == TenantStatus.UPDATE_FAILED else None
+        sqlite.transition(
+            TENANT_ID,
+            expected,
+            new,
+            TransitionFields(
+                manifest=current.manifest,
+                catalog_version=current.catalog_version,
+                initiator=current.initiator,
+                expires_at=current.expires_at,
+                last_error=last_error,
+            ),
+        )
+    return sqlite.get(TENANT_ID)
+
+
+def _update_service(
+    sqlite: SqliteRegistry,
+    clock: MutableClock,
+    catalog: Catalog,
+    calls: list[str],
+) -> PlatformService:
+    return PlatformService(
+        catalog=catalog,
+        registry=RecordingRegistry(sqlite, calls),
+        executor=RecordingExecutor(FakeExecutor(), sqlite, calls),
+        clock=clock,
+        ttl_policy=_policy(),
+    )
+
+
+def test_get_returns_the_plan_owner_and_the_initiator_owner(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        bundle = _bundle(sqlite, clock)
+        plan = bundle.service.plan_create(
+            TENANT_ID, TenantType.DEV, "alice", _manifest()
+        )
+        bundle.service.apply_create(plan, True, _initiator())
+
+        record = sqlite.get(TENANT_ID)
+
+        assert record.owner == "alice"
+        assert record.initiator.owner == "bob"
+
+
+def test_plan_update_unknown_tenant_raises_tenant_not_found(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service = _update_service(sqlite, clock, build_catalog(), calls)
+
+        with pytest.raises(TenantNotFoundError):
+            service.plan_update("missing", _manifest())
+
+        assert calls == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        pytest.param(TenantStatus.CREATING, id="creating"),
+        pytest.param(TenantStatus.UPDATING, id="updating"),
+        pytest.param(TenantStatus.DESTROYING, id="destroying"),
+    ],
+)
+def test_plan_update_rejects_a_status_that_is_not_updatable(
+    tmp_path: Path,
+    status: TenantStatus,
+) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        stored = _seed(
+            sqlite,
+            status=status,
+            manifest=tuple(_manifest().root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, calls)
+
+        with pytest.raises(UpdateNotAllowedError) as caught:
+            service.plan_update(TENANT_ID, _manifest())
+
+        assert status.value in str(caught.value)
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_plan_update_allows_update_failed(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    catalog = build_catalog()
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        _seed(
+            sqlite,
+            status=TenantStatus.UPDATE_FAILED,
+            manifest=tuple(_manifest().root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, [])
+
+        plan = service.plan_update(TENANT_ID, _manifest())
+
+        assert isinstance(plan, UpdatePlan)
+        assert plan.tenant_id == TENANT_ID
+
+
+def test_plan_update_rejects_an_invalid_new_manifest(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        stored = _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=tuple(_manifest().root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, calls)
+        proposed = Manifest.model_validate(
+            [{"type": "no-such-type", "name": "uploads"}]
+        )
+
+        with pytest.raises(ManifestValidationError):
+            service.plan_update(TENANT_ID, proposed)
+
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_plan_update_reports_diff_cost_removals_and_replacements(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    catalog = _replacement_catalog()
+    stored_manifest = (
+        ManifestEntry(
+            type="versioned-bucket",
+            name="uploads",
+            options={"versioning": False},
+        ),
+        ManifestEntry(type="sqs-queue", name="jobs", options={}),
+    )
+    proposed = Manifest.model_validate(
+        [
+            {
+                "type": "versioned-bucket",
+                "name": "uploads",
+                "options": {"versioning": True},
+            },
+            {"type": "versioned-bucket", "name": "reports"},
+        ]
+    )
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=stored_manifest,
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, [])
+
+        plan = service.plan_update(TENANT_ID, proposed)
+
+        assert [entry.name for entry in plan.base_manifest.entries] == [
+            "uploads",
+            "jobs",
+        ]
+        assert [entry.name for entry in plan.new_manifest.entries] == [
+            "uploads",
+            "reports",
+        ]
+        assert plan.catalog_version == catalog.catalog_version
+        assert plan.nothing_to_change is False
+        assert plan.diff == compute_diff(
+            applied=plan.base_manifest,
+            proposed=plan.new_manifest,
+        )
+        assert plan.estimated_cost == estimate_cost(plan.new_manifest)
+        assert plan.removals == ("jobs",)
+        assert plan.replacements == ("uploads",)
+
+
+def test_plan_update_has_no_side_effects(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    proposed = _manifest(
+        ("s3-bucket", "uploads"),
+        ("sqs-queue", "jobs"),
+        ("sqs-queue", "reports"),
+    )
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        stored = _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=tuple(_manifest().root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, calls)
+
+        service.plan_update(TENANT_ID, proposed)
+
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_plan_update_rejects_a_stored_manifest_invalid_for_the_catalog(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    stored_manifest = (ManifestEntry(type="retired", name="uploads", options={}),)
+    proposed = _manifest(("s3-bucket", "uploads"))
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        stored = _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=stored_manifest,
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, calls)
+
+        with pytest.raises(StoredManifestInvalidError) as caught:
+            service.plan_update(TENANT_ID, proposed)
+
+        with pytest.raises(ManifestValidationError) as expected:
+            validate_manifest(
+                Manifest.model_validate([{"type": "retired", "name": "uploads"}]),
+                catalog,
+            )
+        assert caught.value.issues == expected.value.issues
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_reordered_manifest_is_nothing_to_change(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    catalog = build_catalog()
+    proposed = _manifest(("sqs-queue", "jobs"), ("s3-bucket", "uploads"))
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=tuple(_manifest().root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, [])
+
+        plan = service.plan_update(TENANT_ID, proposed)
+
+        assert plan.nothing_to_change is True
+        assert plan.removals == ()
+        assert plan.replacements == ()
+
+
+def test_update_plan_matches_the_stored_and_proposed_manifests(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    catalog = build_catalog()
+    stored = _manifest()
+    proposed = _manifest(("s3-bucket", "uploads"), ("sqs-queue", "reports"))
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=tuple(stored.root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, [])
+
+        plan = service.plan_update(TENANT_ID, proposed)
+
+        assert plan.tenant_id == TENANT_ID
+        assert plan.catalog_version == catalog.catalog_version
+        assert plan.base_manifest == validate_manifest(stored, catalog)
+        assert plan.new_manifest == validate_manifest(proposed, catalog)
+        with pytest.raises(ValidationError):
+            plan.tenant_id = "other"
+
+
+def test_type_change_is_a_removal_and_an_addition(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    catalog = build_catalog()
+    stored = (ManifestEntry(type="s3-bucket", name="uploads", options={}),)
+    proposed = _manifest(("sqs-queue", "uploads"))
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=stored,
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, [])
+
+        plan = service.plan_update(TENANT_ID, proposed)
+
+        assert "uploads" in plan.removals
+        assert "uploads" in [entry.name for entry in plan.diff.added]
+        assert "uploads" not in plan.replacements

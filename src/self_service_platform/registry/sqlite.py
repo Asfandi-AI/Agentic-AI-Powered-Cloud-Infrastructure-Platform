@@ -25,6 +25,7 @@ _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id TEXT PRIMARY KEY,
     tenant_type TEXT NOT NULL,
+    owner TEXT NOT NULL,
     status TEXT NOT NULL,
     manifest_json TEXT NOT NULL,
     catalog_version TEXT NOT NULL,
@@ -40,6 +41,7 @@ _INSERT_TENANT = """
 INSERT INTO tenants (
     tenant_id,
     tenant_type,
+    owner,
     status,
     manifest_json,
     catalog_version,
@@ -48,7 +50,7 @@ INSERT INTO tenants (
     expires_at,
     last_error,
     updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPDATE_TRANSITION = """
@@ -79,6 +81,7 @@ _SELECT_TENANT = """
 SELECT
     tenant_id,
     tenant_type,
+    owner,
     status,
     manifest_json,
     catalog_version,
@@ -128,6 +131,7 @@ class SqliteRegistry:
                 (
                     record.tenant_id,
                     record.tenant_type.value,
+                    record.owner,
                     record.status.value,
                     _dump_manifest(record.manifest),
                     record.catalog_version,
@@ -257,6 +261,7 @@ def _record_from_row(row: sqlite3.Row) -> TenantRecord:
     return TenantRecord(
         tenant_id=row["tenant_id"],
         tenant_type=TenantType(row["tenant_type"]),
+        owner=row["owner"],
         status=TenantStatus(row["status"]),
         manifest=_load_manifest(row["manifest_json"]),
         catalog_version=row["catalog_version"],

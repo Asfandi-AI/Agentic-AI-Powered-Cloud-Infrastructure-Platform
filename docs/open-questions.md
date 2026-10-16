@@ -46,6 +46,14 @@ This create path requires a Manifest, so the Default_Manifest in Requirement 3.2
 
 The Tenant_Id format and the AWS naming limits are unknown, so Requirement 2.3 is not enforced for a name that would violate those limits.
 
+## Owner column
+
+The `owner` column was added to the tenant table with no migration because there is no deployed data.
+
+## Type change during update
+
+When a component keeps its name but changes type, the removal verification (Requirement 4.8) must not mistake the newly created resource for a leftover.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).
