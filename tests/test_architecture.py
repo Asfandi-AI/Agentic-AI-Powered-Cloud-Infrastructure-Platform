@@ -9,6 +9,7 @@ _CORE_PREFIXES = (
     "self_service_platform.executors",
     "self_service_platform.registry",
 )
+_CATALOG_MODULES = frozenset({"boto3", "botocore", "aws_cdk"})
 _CATALOG_PREFIXES = ("self_service_platform.executors",)
 
 
@@ -68,6 +69,6 @@ def test_core_cli_and_catalog_stay_inside_their_boundaries() -> None:
     violations = [
         *_violations(_PACKAGE / "core", _CORE_MODULES, _CORE_PREFIXES),
         *_violations(_PACKAGE / "cli", _CORE_MODULES, _CORE_PREFIXES),
-        *_violations(_PACKAGE / "catalog", frozenset(), _CATALOG_PREFIXES),
+        *_violations(_PACKAGE / "catalog", _CATALOG_MODULES, _CATALOG_PREFIXES),
     ]
     assert violations == []
