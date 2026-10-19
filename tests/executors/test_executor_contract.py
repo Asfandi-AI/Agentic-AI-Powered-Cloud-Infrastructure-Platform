@@ -151,3 +151,22 @@ def test_tenant_role_exists_after_provision_and_not_after_destroy(
 
     executor.destroy(request.tenant_id)
     assert executor.tenant_role_exists(request.tenant_id) is False
+
+
+@pytest.mark.parametrize("factory", EXECUTOR_FACTORIES)
+def test_type_change_leaves_one_resource_of_the_new_type(
+    factory: Callable[[], Executor],
+) -> None:
+    executor = factory()
+    tenant_id = "tenant-a"
+    executor.provision(_request(_manifest(("s3-bucket", "uploads"))))
+    previous = executor.list_tagged_resources(tenant_id, component="uploads")
+    assert len(previous) == 1
+    proposed = _manifest(("sqs-queue", "uploads"))
+
+    executor.provision(_request(proposed))
+
+    resources = executor.list_tagged_resources(tenant_id, component="uploads")
+    new_type = proposed.entries[0].component.aws_service.value
+    assert previous[0].resource_type != new_type
+    assert [resource.resource_type for resource in resources] == [new_type]

@@ -95,6 +95,25 @@ class UpdatePlan(BaseModel):
     replacements: tuple[str, ...]
 
 
+class UpdateConfirmations(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    update: bool
+    removals: bool
+    replacements: frozenset[str]
+
+
+class UpdateResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    changed: bool
+    record: TenantRecord
+
+
+class UpdateFailedError(Exception):
+    """Raised when an update provision or removal check fails."""
+
+
 class PlatformService:
     def __init__(
         self,
@@ -146,6 +165,29 @@ class PlatformService:
             replacements=tuple(entry.name for entry in diff.replacements),
         )
 
+    def apply_update(
+        self,
+        plan: UpdatePlan,
+        confirmations: UpdateConfirmations,
+        initiator: Initiator,
+    ) -> UpdateResult:
+        if plan.nothing_to_change:
+            current = self._registry.get(plan.tenant_id)
+            return UpdateResult(changed=False, record=current)
+        _refuse_unconfirmed(plan, confirmations)
+        record = self._ready_to_update(plan)
+        self._mark_updating(record, initiator)
+        try:
+            self._executor.provision(_update_request(record, plan))
+        except ExecutorError as exc:
+            self._mark_update_failed(record, initiator, exc)
+        leftovers = self._leftover_names(plan)
+        if leftovers:
+            cause = Exception(f"leftover resources remain: {', '.join(leftovers)}")
+            self._mark_update_failed(record, initiator, cause)
+        updated = self._mark_active(record, plan, initiator)
+        return UpdateResult(changed=True, record=updated)
+
     def apply_create(
         self,
         plan: CreatePlan,
@@ -185,6 +227,83 @@ class PlatformService:
             return validate_manifest(stored, self._catalog)
         except ManifestValidationError as exc:
             raise StoredManifestInvalidError(exc.issues) from exc
+
+    def _ready_to_update(self, plan: UpdatePlan) -> TenantRecord:
+        record = self._registry.get(plan.tenant_id)
+        if plan.catalog_version != self._catalog.catalog_version:
+            raise StalePlanError("catalog version does not match")
+        if not self._matches_base(record.manifest, plan.base_manifest):
+            raise StalePlanError("stored manifest does not match the plan")
+        _require_updatable(record.status)
+        return record
+
+    def _matches_base(
+        self,
+        entries: tuple[ManifestEntry, ...],
+        base: ValidatedManifest,
+    ) -> bool:
+        stored = Manifest.model_validate([entry.model_dump() for entry in entries])
+        try:
+            current = validate_manifest(stored, self._catalog)
+        except ManifestValidationError:
+            return False
+        return current == base
+
+    def _mark_updating(self, record: TenantRecord, initiator: Initiator) -> None:
+        self._registry.transition(
+            record.tenant_id,
+            record.status,
+            TenantStatus.UPDATING,
+            _carried_fields(record, initiator, record.last_error),
+        )
+
+    def _leftover_names(self, plan: UpdatePlan) -> tuple[str, ...]:
+        added = {entry.name for entry in plan.diff.added}
+        names: list[str] = []
+        for name in plan.removals:
+            found = self._executor.list_tagged_resources(plan.tenant_id, component=name)
+            if name in added:
+                new_type = _component_service(plan.new_manifest, name)
+                found = tuple(
+                    resource for resource in found if resource.resource_type != new_type
+                )
+            if found:
+                names.append(name)
+        return tuple(names)
+
+    def _mark_update_failed(
+        self,
+        record: TenantRecord,
+        initiator: Initiator,
+        exc: BaseException,
+    ) -> None:
+        message = truncate_error(str(exc))
+        self._registry.transition(
+            record.tenant_id,
+            TenantStatus.UPDATING,
+            TenantStatus.UPDATE_FAILED,
+            _carried_fields(record, initiator, message),
+        )
+        raise UpdateFailedError(message) from exc
+
+    def _mark_active(
+        self,
+        record: TenantRecord,
+        plan: UpdatePlan,
+        initiator: Initiator,
+    ) -> TenantRecord:
+        return self._registry.transition(
+            record.tenant_id,
+            TenantStatus.UPDATING,
+            TenantStatus.ACTIVE,
+            TransitionFields(
+                manifest=_manifest_entries(plan.new_manifest),
+                catalog_version=plan.catalog_version,
+                initiator=initiator,
+                expires_at=record.expires_at,
+                last_error=None,
+            ),
+        )
 
     def _creating_record(
         self,
@@ -235,6 +354,50 @@ class PlatformService:
                 last_error=None,
             ),
         )
+
+
+def _refuse_unconfirmed(plan: UpdatePlan, confirmations: UpdateConfirmations) -> None:
+    missing: list[str] = []
+    if confirmations.update is not True:
+        missing.append("update")
+    if plan.removals and confirmations.removals is not True:
+        missing.append("removals")
+    missing.extend(
+        name for name in plan.replacements if name not in confirmations.replacements
+    )
+    if missing:
+        detail = ", ".join(missing)
+        raise ConfirmationRequiredError(f"missing confirmation: {detail}")
+
+
+def _update_request(record: TenantRecord, plan: UpdatePlan) -> ProvisionRequest:
+    return ProvisionRequest(
+        tenant_id=plan.tenant_id,
+        tenant_type=record.tenant_type,
+        owner=record.owner,
+        manifest=plan.new_manifest,
+    )
+
+
+def _carried_fields(
+    record: TenantRecord,
+    initiator: Initiator,
+    last_error: str | None,
+) -> TransitionFields:
+    return TransitionFields(
+        manifest=record.manifest,
+        catalog_version=record.catalog_version,
+        initiator=initiator,
+        expires_at=record.expires_at,
+        last_error=last_error,
+    )
+
+
+def _component_service(manifest: ValidatedManifest, name: str) -> str:
+    for entry in manifest.entries:
+        if entry.name == name:
+            return entry.component.aws_service.value
+    raise ValueError(f"no component {name}")
 
 
 def _require_updatable(status: TenantStatus) -> None:

@@ -36,7 +36,7 @@ The currency or unit of amounts is not specified.
 
 ## Diff confirmation
 
-Confirmations for removals and replacements (Requirements 4.3 and 4.9) are not implemented because `diff` only reports.
+The CLI `diff` command only reports, so it does not ask for the confirmations in Requirements 4.3 and 4.9. `apply_update` requires those confirmations.
 
 ## Manifest required on create
 
@@ -53,6 +53,38 @@ The `owner` column was added to the tenant table with no migration because there
 ## Type change during update
 
 When a component keeps its name but changes type, the removal verification (Requirement 4.8) must not mistake the newly created resource for a leftover.
+
+## Failed update record
+
+Failing to record a failed update leaves the tenant in `updating`.
+
+## Retry of a failed update
+
+Retrying a failed update with the old manifest gives an empty diff and no Executor call, so partial resources stay.
+
+## Stuck in updating
+
+A tenant stuck in `updating` after an exception that is not an ExecutorError cannot move on.
+
+## Replacement in the fake executor
+
+The in-memory fake does not model replacement as delete and recreate, so real executors need their own tests.
+
+## Stored manifest and a newer catalog
+
+A stored manifest that no longer validates against a newer catalog needs a migration story.
+
+## Stale plan race
+
+The stale-plan check compares the stored manifest with the plan, then the registry's conditional write compares only the status, so a very narrow race window remains.
+
+## Type change on the same AWS service
+
+For a type change between two components on the same AWS service, the leftover check cannot tell old resources from new ones.
+
+## Expired tenant update
+
+Whether a tenant whose `expires_at` has already passed may still be updated is not defined by the spec.
 
 ## Decided
 
