@@ -9,6 +9,7 @@ from self_service_platform.core.executor import (
     Executor,
     ExecutorError,
     ProvisionRequest,
+    ResourceRef,
 )
 from self_service_platform.core.manifest import Manifest, ManifestEntry
 from self_service_platform.core.registry import Clock, Registry
@@ -114,6 +115,33 @@ class UpdateFailedError(Exception):
     """Raised when an update provision or removal check fails."""
 
 
+class DestroyNotAllowedError(Exception):
+    """Raised when the tenant status does not allow a destroy."""
+
+
+class DestroyFailedError(Exception):
+    """Raised when destroy or its verification fails."""
+
+
+class DestroyPlan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str
+    tenant_type: TenantType
+    component_names: tuple[str, ...]
+    status: TenantStatus
+    statement: str
+
+
+class DestroyResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    record: TenantRecord
+
+
+_DESTROY_STATEMENT = "all resources and data of the tenant will be deleted"
+
+
 class PlatformService:
     def __init__(
         self,
@@ -200,6 +228,30 @@ class PlatformService:
         self._provision(plan)
         record = self._activate(plan, initiator, manifest)
         return CreateResult(record=record)
+
+    def plan_destroy(self, tenant_id: str) -> DestroyPlan:
+        record = self._registry.get(tenant_id)
+        _require_destroyable(record.status)
+        return DestroyPlan(
+            tenant_id=record.tenant_id,
+            tenant_type=record.tenant_type,
+            component_names=tuple(entry.name for entry in record.manifest),
+            status=record.status,
+            statement=_DESTROY_STATEMENT,
+        )
+
+    def apply_destroy(
+        self,
+        plan: DestroyPlan,
+        confirmed: object,
+        initiator: Initiator,
+    ) -> DestroyResult:
+        if confirmed is not True:
+            raise ConfirmationRequiredError("confirmation must be True")
+        record = self._ready_to_destroy(plan)
+        self._mark_destroying(record, initiator)
+        self._run_destroy(record, initiator)
+        return DestroyResult(record=self._mark_destroyed(record, initiator))
 
     def _expires_at(self, tenant_type: TenantType) -> datetime | None:
         ttl = _ttl_for(tenant_type, self._ttl_policy)
@@ -357,6 +409,65 @@ class PlatformService:
             ),
         )
 
+    def _ready_to_destroy(self, plan: DestroyPlan) -> TenantRecord:
+        record = self._registry.get(plan.tenant_id)
+        if record.status is not plan.status:
+            raise StalePlanError("stored status does not match the plan")
+        _require_destroyable(record.status)
+        return record
+
+    def _mark_destroying(self, record: TenantRecord, initiator: Initiator) -> None:
+        self._registry.transition(
+            record.tenant_id,
+            record.status,
+            TenantStatus.DESTROYING,
+            _carried_fields(record, initiator, record.last_error),
+        )
+
+    def _run_destroy(self, record: TenantRecord, initiator: Initiator) -> None:
+        try:
+            self._executor.destroy(record.tenant_id)
+        except ExecutorError as exc:
+            raise self._destroy_failed(record, initiator, exc) from exc
+        try:
+            leftovers = self._executor.list_tagged_resources(record.tenant_id)
+        except ExecutorError as exc:
+            raise self._destroy_failed(record, initiator, exc) from exc
+        try:
+            role_exists = self._executor.tenant_role_exists(record.tenant_id)
+        except ExecutorError as exc:
+            raise self._destroy_failed(record, initiator, exc) from exc
+        if leftovers or role_exists:
+            cause = _verification_failure(leftovers, role_exists)
+            raise self._destroy_failed(record, initiator, cause) from cause
+
+    def _mark_destroyed(
+        self,
+        record: TenantRecord,
+        initiator: Initiator,
+    ) -> TenantRecord:
+        return self._registry.transition(
+            record.tenant_id,
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROYED,
+            _carried_fields(record, initiator, None),
+        )
+
+    def _destroy_failed(
+        self,
+        record: TenantRecord,
+        initiator: Initiator,
+        exc: BaseException,
+    ) -> DestroyFailedError:
+        message = truncate_error(str(exc))
+        self._registry.transition(
+            record.tenant_id,
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROY_FAILED,
+            _carried_fields(record, initiator, message),
+        )
+        return DestroyFailedError(message)
+
 
 def _refuse_unconfirmed(plan: UpdatePlan, confirmations: UpdateConfirmations) -> None:
     missing: list[str] = []
@@ -406,6 +517,29 @@ def _require_updatable(status: TenantStatus) -> None:
     if status is TenantStatus.ACTIVE or status is TenantStatus.UPDATE_FAILED:
         return
     raise UpdateNotAllowedError(f"cannot update status {status.value}")
+
+
+def _require_destroyable(status: TenantStatus) -> None:
+    if status in (
+        TenantStatus.ACTIVE,
+        TenantStatus.UPDATE_FAILED,
+        TenantStatus.DESTROY_FAILED,
+    ):
+        return
+    raise DestroyNotAllowedError(f"cannot destroy status {status.value}")
+
+
+def _verification_failure(
+    leftovers: tuple[ResourceRef, ...],
+    role_exists: bool,
+) -> Exception:
+    parts: list[str] = []
+    if leftovers:
+        identifiers = ", ".join(resource.identifier for resource in leftovers)
+        parts.append(f"leftover resources remain: {identifiers}")
+    if role_exists:
+        parts.append("tenant role remains")
+    return Exception("; ".join(parts))
 
 
 def _ttl_for(tenant_type: TenantType, policy: TtlPolicy) -> timedelta | None:

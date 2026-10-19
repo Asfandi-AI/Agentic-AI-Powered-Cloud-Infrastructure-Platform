@@ -16,6 +16,14 @@ The defined destroy transitions are `active` → `destroying` and `update_failed
 
 Whether a tenant may move from `creating` to `destroying` is still open.
 
+## Reusing a destroyed tenant id
+
+Whether a `destroyed` tenant id may be created again is undecided.
+
+## Destroy plan component names
+
+The plan's `component_names` are those at plan time. A destroy removes everything regardless.
+
 ## Sweeper and destroyed tenants
 
 A future Sweeper must skip `destroyed` tenants. Their `expires_at` stays stored for history.
@@ -75,6 +83,10 @@ Retrying a failed update with the old manifest gives an empty diff and no Execut
 ## Stuck in updating
 
 A tenant stuck in `updating` after an exception that is not an ExecutorError cannot move on.
+
+## Stuck in destroying
+
+A tenant left in `destroying` (crash, or a failed write after a successful destroy) cannot be retried because no transition leaves `destroying` except to `destroyed` or `destroy_failed`.
 
 ## Replacement in the fake executor
 

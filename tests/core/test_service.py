@@ -26,6 +26,10 @@ from self_service_platform.core.registry import Registry
 from self_service_platform.core.service import (
     ConfirmationRequiredError,
     CreateResult,
+    DestroyFailedError,
+    DestroyNotAllowedError,
+    DestroyPlan,
+    DestroyResult,
     PlatformService,
     ProvisionFailedError,
     StalePlanError,
@@ -48,6 +52,7 @@ from self_service_platform.core.tenant import (
     TenantStatus,
     TenantType,
     TransitionFields,
+    TransitionRejectedError,
     truncate_error,
 )
 from self_service_platform.core.validator import (
@@ -592,6 +597,16 @@ _TO_STATUS: dict[TenantStatus, tuple[tuple[TenantStatus, TenantStatus], ...]] = 
     TenantStatus.DESTROYING: (
         (TenantStatus.CREATING, TenantStatus.ACTIVE),
         (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+    ),
+    TenantStatus.DESTROY_FAILED: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROY_FAILED),
+    ),
+    TenantStatus.DESTROYED: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROYED),
     ),
 }
 
@@ -1957,3 +1972,678 @@ def test_failed_update_record_propagates(tmp_path: Path) -> None:
 
         assert caught.value is registry.error
         assert sqlite.get(TENANT_ID).status is TenantStatus.UPDATING
+
+
+_DESTROY_STATEMENT = "all resources and data of the tenant will be deleted"
+
+
+def _catalog_seed(sqlite: SqliteRegistry, status: TenantStatus) -> Catalog:
+    catalog = build_catalog()
+    _seed(
+        sqlite,
+        status=status,
+        manifest=tuple(_manifest().root),
+        catalog_version=catalog.catalog_version,
+    )
+    return catalog
+
+
+def _arm(executor: FakeExecutor, catalog: Catalog) -> None:
+    executor.provision(
+        ProvisionRequest(
+            tenant_id=TENANT_ID,
+            tenant_type=TenantType.DEV,
+            owner="alice",
+            manifest=validate_manifest(_manifest(), catalog),
+        )
+    )
+
+
+class _DestroyTrace(RecordingExecutor):
+    def __init__(
+        self,
+        inner: FakeExecutor,
+        registry: SqliteRegistry,
+        calls: list[str],
+    ) -> None:
+        super().__init__(inner, registry, calls)
+        self.during: TenantRecord | None = None
+
+    def destroy(self, tenant_id: str) -> None:
+        self.during = self._registry.get(tenant_id)
+        super().destroy(tenant_id)
+
+    def list_tagged_resources(
+        self,
+        tenant_id: str,
+        component: str | None = None,
+    ) -> tuple[ResourceRef, ...]:
+        self._calls.append("list_tagged_resources")
+        return super().list_tagged_resources(tenant_id, component)
+
+    def tenant_role_exists(self, tenant_id: str) -> bool:
+        self._calls.append("tenant_role_exists")
+        return super().tenant_role_exists(tenant_id)
+
+
+class _RoleRemains(FakeExecutor):
+    def tenant_role_exists(self, tenant_id: str) -> bool:
+        super().tenant_role_exists(tenant_id)
+        return True
+
+
+class _DestroyExplodes(FakeExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.error = ExecutorError(_LONG_ERROR)
+
+    def destroy(self, tenant_id: str) -> None:
+        raise self.error
+
+
+class _KeyDestroy(FakeExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.error = KeyError("boom")
+
+    def destroy(self, tenant_id: str) -> None:
+        raise self.error
+
+
+class _VerificationExplodes(FakeExecutor):
+    def __init__(self, method: str) -> None:
+        super().__init__()
+        self.error = ExecutorError(_LONG_ERROR)
+        self._method = method
+
+    def list_tagged_resources(
+        self,
+        tenant_id: str,
+        component: str | None = None,
+    ) -> tuple[ResourceRef, ...]:
+        if self._method == "list":
+            raise self.error
+        return ()
+
+    def tenant_role_exists(self, tenant_id: str) -> bool:
+        if self._method == "role":
+            raise self.error
+        return False
+
+
+class _ReportsTwoLeftovers(FakeExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.identifiers = ("left-a", "left-b")
+
+    def list_tagged_resources(
+        self,
+        tenant_id: str,
+        component: str | None = None,
+    ) -> tuple[ResourceRef, ...]:
+        return tuple(
+            ResourceRef(
+                resource_type=AwsService.S3.value,
+                identifier=identifier,
+                tags={"component": identifier},
+            )
+            for identifier in self.identifiers
+        )
+
+    def tenant_role_exists(self, tenant_id: str) -> bool:
+        return False
+
+
+class _RejectsEnteringDestroying:
+    def __init__(self, inner: SqliteRegistry) -> None:
+        self._inner = inner
+        self.error = TransitionRejectedError("conditional write rejected")
+
+    def create_tenant(self, record: TenantRecord) -> None:
+        self._inner.create_tenant(record)
+
+    def get(self, tenant_id: str) -> TenantRecord:
+        return self._inner.get(tenant_id)
+
+    def transition(
+        self,
+        tenant_id: str,
+        expected: TenantStatus,
+        new: TenantStatus,
+        fields: TransitionFields,
+    ) -> TenantRecord:
+        if new is TenantStatus.DESTROYING:
+            raise self.error
+        return self._inner.transition(tenant_id, expected, new, fields)
+
+
+class _DestroyWriteFails:
+    def __init__(self, inner: SqliteRegistry, new: TenantStatus) -> None:
+        self._inner = inner
+        self._new = new
+        self.error = RuntimeError(f"{new.value} write failed")
+
+    def create_tenant(self, record: TenantRecord) -> None:
+        self._inner.create_tenant(record)
+
+    def get(self, tenant_id: str) -> TenantRecord:
+        return self._inner.get(tenant_id)
+
+    def transition(
+        self,
+        tenant_id: str,
+        expected: TenantStatus,
+        new: TenantStatus,
+        fields: TransitionFields,
+    ) -> TenantRecord:
+        if expected is TenantStatus.DESTROYING and new is self._new:
+            raise self.error
+        return self._inner.transition(tenant_id, expected, new, fields)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        pytest.param(TenantStatus.CREATING, id="creating"),
+        pytest.param(TenantStatus.UPDATING, id="updating"),
+        pytest.param(TenantStatus.DESTROYING, id="destroying"),
+        pytest.param(TenantStatus.DESTROYED, id="destroyed"),
+    ],
+)
+def test_plan_destroy_rejects_a_status_that_cannot_be_destroyed(
+    tmp_path: Path,
+    status: TenantStatus,
+) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, status)
+        stored = sqlite.get(TENANT_ID)
+        service = _update_service(sqlite, clock, catalog, calls)
+
+        with pytest.raises(DestroyNotAllowedError) as caught:
+            service.plan_destroy(TENANT_ID)
+
+        assert status.value in str(caught.value)
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_plan_destroy_has_no_side_effects(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        stored = sqlite.get(TENANT_ID)
+        service = _update_service(sqlite, clock, catalog, calls)
+
+        service.plan_destroy(TENANT_ID)
+
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_destroy_plan_states_the_deletion_and_is_frozen(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        service = _update_service(sqlite, clock, catalog, [])
+
+        plan = service.plan_destroy(TENANT_ID)
+
+        assert isinstance(plan, DestroyPlan)
+        assert plan.tenant_id == TENANT_ID
+        assert plan.tenant_type is TenantType.DEV
+        assert plan.component_names == ("uploads", "jobs")
+        assert plan.status is TenantStatus.ACTIVE
+        assert plan.statement == _DESTROY_STATEMENT
+        with pytest.raises(ValidationError):
+            plan.tenant_id = "other"
+
+
+@pytest.mark.parametrize("confirmed", [False, "yes", 1])
+def test_unconfirmed_destroy_is_refused(tmp_path: Path, confirmed: object) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        stored = sqlite.get(TENANT_ID)
+        service = _update_service(sqlite, clock, catalog, calls)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(ConfirmationRequiredError):
+            service.apply_destroy(plan, confirmed, _updater())
+
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_destroy_runs_while_status_is_destroying_and_in_order(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        executor = _DestroyTrace(fake, sqlite, calls)
+        service = _service(catalog, RecordingRegistry(sqlite, calls), executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        service.apply_destroy(plan, True, _updater())
+
+        assert executor.during is not None
+        assert executor.during.status is TenantStatus.DESTROYING
+        assert calls == [
+            "transition",
+            "destroy",
+            "list_tagged_resources",
+            "tenant_role_exists",
+            "transition",
+        ]
+
+
+def test_destroying_transition_stores_the_initiator_and_keeps_the_stored_fields(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        before = sqlite.get(TENANT_ID)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        executor = _DestroyTrace(fake, sqlite, calls)
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        service.apply_destroy(plan, True, _updater())
+
+        during = executor.during
+        assert during is not None
+        assert during.initiator == _updater()
+        assert during.manifest == before.manifest
+        assert during.catalog_version == before.catalog_version
+        assert during.owner == before.owner
+        assert during.expires_at == before.expires_at
+
+
+def test_successful_destroy_leaves_no_resources_and_no_role(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        executor = RecordingExecutor(fake, sqlite, calls)
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        result = service.apply_destroy(plan, True, _updater())
+
+        assert isinstance(result, DestroyResult)
+        assert result.record == sqlite.get(TENANT_ID)
+        assert result.record.status is TenantStatus.DESTROYED
+        assert result.record.last_error is None
+        assert executor.list_tagged_resources(TENANT_ID) == ()
+        assert executor.tenant_role_exists(TENANT_ID) is False
+        with pytest.raises(ValidationError):
+            result.record = result.record
+
+
+def test_leftover_resource_ends_destroy_failed_and_names_the_identifier(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        fake.leave_one_resource_on_next_destroy()
+        service = _service(catalog, sqlite, fake, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(DestroyFailedError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        record = sqlite.get(TENANT_ID)
+        leftovers = fake.list_tagged_resources(TENANT_ID)
+        assert record.status is TenantStatus.DESTROY_FAILED
+        assert fake.tenant_role_exists(TENANT_ID) is False
+        assert len(leftovers) == 1
+        assert leftovers[0].identifier in str(caught.value)
+        assert record.last_error is not None
+        assert leftovers[0].identifier in record.last_error
+
+
+def test_leftover_role_with_no_resources_ends_destroy_failed(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        executor = _RoleRemains()
+        _arm(executor, catalog)
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(DestroyFailedError):
+            service.apply_destroy(plan, True, _updater())
+
+        assert sqlite.get(TENANT_ID).status is TenantStatus.DESTROY_FAILED
+        assert executor.list_tagged_resources(TENANT_ID) == ()
+        assert executor.tenant_role_exists(TENANT_ID) is True
+
+
+def test_executor_error_ends_destroy_failed_with_the_truncated_cause(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        executor = _DestroyExplodes()
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(DestroyFailedError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        cause = caught.value.__cause__
+        record = sqlite.get(TENANT_ID)
+        assert isinstance(cause, ExecutorError)
+        assert cause is executor.error
+        assert str(caught.value) == truncate_error(str(cause))
+        assert len(str(cause)) > ERROR_TEXT_LIMIT
+        assert record.status is TenantStatus.DESTROY_FAILED
+        assert record.last_error == truncate_error(str(cause))
+
+
+def test_second_destroy_from_destroy_failed_succeeds(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        fake.leave_one_resource_on_next_destroy()
+        service = _service(catalog, sqlite, fake, clock)
+        plan = service.plan_destroy(TENANT_ID)
+        with pytest.raises(DestroyFailedError):
+            service.apply_destroy(plan, True, _updater())
+        assert sqlite.get(TENANT_ID).status is TenantStatus.DESTROY_FAILED
+
+        retry = service.plan_destroy(TENANT_ID)
+        result = service.apply_destroy(retry, True, _updater())
+
+        assert result.record.status is TenantStatus.DESTROYED
+        assert fake.list_tagged_resources(TENANT_ID) == ()
+        assert fake.tenant_role_exists(TENANT_ID) is False
+
+
+def test_non_executor_error_stays_destroying(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        executor = _KeyDestroy()
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(KeyError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        assert caught.value is executor.error
+        assert sqlite.get(TENANT_ID).status is TenantStatus.DESTROYING
+
+
+def test_applying_the_same_destroy_plan_twice_destroys_once(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        executor = RecordingExecutor(fake, sqlite, calls)
+        service = _service(catalog, RecordingRegistry(sqlite, calls), executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        first = service.apply_destroy(plan, True, _updater())
+        with pytest.raises(StalePlanError):
+            service.apply_destroy(plan, True, _updater())
+
+        assert first.record.status is TenantStatus.DESTROYED
+        assert calls.count("destroy") == 1
+
+
+def test_stale_destroy_status_is_refused(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        service = _update_service(sqlite, clock, catalog, calls)
+        plan = service.plan_destroy(TENANT_ID)
+        _shift(sqlite, tuple(_manifest().root), TenantStatus.UPDATING)
+        stored = sqlite.get(TENANT_ID)
+
+        with pytest.raises(StalePlanError):
+            service.apply_destroy(plan, True, _updater())
+
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_rejected_transition_to_destroying_does_not_call_destroy(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        stored = sqlite.get(TENANT_ID)
+        registry = _RejectsEnteringDestroying(sqlite)
+        executor = RecordingExecutor(FakeExecutor(), sqlite, calls)
+        service = _service(catalog, registry, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(TransitionRejectedError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        assert caught.value is registry.error
+        assert "destroy" not in calls
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_destroying_one_tenant_leaves_the_other_untouched(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        executor = RecordingExecutor(FakeExecutor(), sqlite, calls)
+        service = _service(catalog, sqlite, executor, clock)
+        for tenant_id in (TENANT_ID, "tenant-b"):
+            created = service.plan_create(
+                tenant_id,
+                TenantType.DEV,
+                "alice",
+                _manifest(),
+            )
+            service.apply_create(created, True, _initiator())
+        before = sqlite.get("tenant-b")
+        resources = executor.list_tagged_resources("tenant-b")
+        plan = service.plan_destroy(TENANT_ID)
+
+        service.apply_destroy(plan, True, _updater())
+
+        assert sqlite.get("tenant-b") == before
+        assert sqlite.get("tenant-b").status is TenantStatus.ACTIVE
+        assert resources
+        assert executor.list_tagged_resources("tenant-b") == resources
+
+
+def test_failed_destroyed_write_stays_destroying(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        registry = _DestroyWriteFails(sqlite, TenantStatus.DESTROYED)
+        executor = RecordingExecutor(fake, sqlite, calls)
+        service = _service(catalog, registry, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(RuntimeError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        assert caught.value is registry.error
+        assert sqlite.get(TENANT_ID).status is TenantStatus.DESTROYING
+        assert calls.count("destroy") == 1
+
+
+def test_failed_destroy_failed_write_stays_destroying(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        registry = _DestroyWriteFails(sqlite, TenantStatus.DESTROY_FAILED)
+        executor = _DestroyExplodes()
+        service = _service(catalog, registry, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(RuntimeError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        assert caught.value is registry.error
+        assert sqlite.get(TENANT_ID).status is TenantStatus.DESTROYING
+
+
+def test_destroy_from_update_failed_clears_the_error(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.UPDATE_FAILED)
+        assert sqlite.get(TENANT_ID).last_error == "provision failed"
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        service = _service(catalog, sqlite, fake, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        result = service.apply_destroy(plan, True, _updater())
+
+        assert result.record.status is TenantStatus.DESTROYED
+        assert result.record.last_error is None
+        assert fake.list_tagged_resources(TENANT_ID) == ()
+        assert fake.tenant_role_exists(TENANT_ID) is False
+
+
+def test_create_and_update_never_record_destroy(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        executor = RecordingExecutor(FakeExecutor(), sqlite, calls)
+        service = _service(catalog, RecordingRegistry(sqlite, calls), executor, clock)
+        created = service.plan_create(TENANT_ID, TenantType.DEV, "alice", _manifest())
+        service.apply_create(created, True, _initiator())
+        updated = service.plan_update(TENANT_ID, _added_manifest())
+
+        service.apply_update(updated, _confirmed(), _updater())
+
+        assert "provision" in calls
+        assert "destroy" not in calls
+
+
+def test_destroyed_tenant_id_cannot_be_created_again(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        fake = FakeExecutor()
+        _arm(fake, catalog)
+        service = _service(catalog, sqlite, fake, clock)
+        plan = service.plan_destroy(TENANT_ID)
+        service.apply_destroy(plan, True, _updater())
+        destroyed = sqlite.get(TENANT_ID)
+        again = service.plan_create(TENANT_ID, TenantType.DEV, "alice", _manifest())
+
+        with pytest.raises(DuplicateTenantError):
+            service.apply_create(again, True, _initiator())
+
+        assert destroyed.status is TenantStatus.DESTROYED
+        assert sqlite.get(TENANT_ID) == destroyed
+
+
+def test_list_error_during_verification_ends_destroy_failed(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        executor = _VerificationExplodes("list")
+        _arm(executor, catalog)
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(DestroyFailedError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        cause = caught.value.__cause__
+        record = sqlite.get(TENANT_ID)
+        assert isinstance(cause, ExecutorError)
+        assert cause is executor.error
+        assert str(caught.value) == truncate_error(str(cause))
+        assert record.status is TenantStatus.DESTROY_FAILED
+        assert record.last_error == truncate_error(str(cause))
+
+
+def test_role_error_during_verification_ends_destroy_failed(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        executor = _VerificationExplodes("role")
+        _arm(executor, catalog)
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(DestroyFailedError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        cause = caught.value.__cause__
+        record = sqlite.get(TENANT_ID)
+        assert isinstance(cause, ExecutorError)
+        assert cause is executor.error
+        assert str(caught.value) == truncate_error(str(cause))
+        assert record.status is TenantStatus.DESTROY_FAILED
+        assert record.last_error == truncate_error(str(cause))
+
+
+def test_two_leftovers_are_both_named_within_the_truncation_limit(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        executor = _ReportsTwoLeftovers()
+        _arm(executor, catalog)
+        service = _service(catalog, sqlite, executor, clock)
+        plan = service.plan_destroy(TENANT_ID)
+
+        with pytest.raises(DestroyFailedError) as caught:
+            service.apply_destroy(plan, True, _updater())
+
+        record = sqlite.get(TENANT_ID)
+        message = str(caught.value)
+        assert record.status is TenantStatus.DESTROY_FAILED
+        assert record.last_error is not None
+        assert len(record.last_error) <= ERROR_TEXT_LIMIT
+        assert record.last_error == truncate_error(message)
+        for identifier in executor.identifiers:
+            assert identifier in message
+            assert identifier in record.last_error
+
+
+def test_expired_tenant_can_be_destroyed(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
+        clock.now = T0 + DEV_TTL + timedelta(seconds=1)
+        stored = sqlite.get(TENANT_ID)
+        assert stored.expires_at is not None
+        assert stored.expires_at < clock.now
+        service = _service(catalog, sqlite, FakeExecutor(), clock)
+
+        plan = service.plan_destroy(TENANT_ID)
+        result = service.apply_destroy(plan, True, _updater())
+
+        assert plan.status is TenantStatus.ACTIVE
+        assert result.record.status is TenantStatus.DESTROYED
