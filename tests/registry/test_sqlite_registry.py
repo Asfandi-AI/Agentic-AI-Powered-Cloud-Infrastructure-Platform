@@ -19,6 +19,7 @@ from self_service_platform.core.tenant import (
     TenantType,
     TransitionFields,
     TransitionRejectedError,
+    truncate_error,
 )
 from self_service_platform.registry.sqlite import SqliteRegistry
 
@@ -51,6 +52,9 @@ _ALLOWED = frozenset(
         (TenantStatus.UPDATING, TenantStatus.UPDATE_FAILED),
         (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
         (TenantStatus.UPDATE_FAILED, TenantStatus.DESTROYING),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROYED),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROY_FAILED),
+        (TenantStatus.DESTROY_FAILED, TenantStatus.DESTROYING),
     }
 )
 
@@ -69,6 +73,16 @@ _STEPS_TO: dict[TenantStatus, tuple[tuple[TenantStatus, TenantStatus], ...]] = {
     TenantStatus.DESTROYING: (
         (TenantStatus.CREATING, TenantStatus.ACTIVE),
         (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+    ),
+    TenantStatus.DESTROY_FAILED: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROY_FAILED),
+    ),
+    TenantStatus.DESTROYED: (
+        (TenantStatus.CREATING, TenantStatus.ACTIVE),
+        (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROYED),
     ),
 }
 
@@ -135,7 +149,9 @@ def _walk(
     expires_at: datetime | None = T0,
 ) -> None:
     for expected, new in _STEPS_TO[status]:
-        last_error = "provision failed" if new == TenantStatus.UPDATE_FAILED else None
+        last_error = None
+        if new in (TenantStatus.UPDATE_FAILED, TenantStatus.DESTROY_FAILED):
+            last_error = "provision failed"
         registry.transition(
             tenant_id,
             expected,
@@ -473,6 +489,26 @@ def test_owner_stays_the_create_value_across_the_lifecycle(tmp_path: Path) -> No
             TenantStatus.ACTIVE,
             _initiator(InitiatorKind.AGENT, "frank"),
         ),
+        (
+            TenantStatus.ACTIVE,
+            TenantStatus.DESTROYING,
+            _initiator(InitiatorKind.CLI, "grace"),
+        ),
+        (
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROY_FAILED,
+            _initiator(InitiatorKind.AGENT, "heidi"),
+        ),
+        (
+            TenantStatus.DESTROY_FAILED,
+            TenantStatus.DESTROYING,
+            _initiator(InitiatorKind.CLI, "ivan"),
+        ),
+        (
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROYED,
+            _initiator(InitiatorKind.AGENT, "judy"),
+        ),
     )
     path = tmp_path / "registry.sqlite"
     with SqliteRegistry(path, _clock(T0)) as registry:
@@ -481,7 +517,10 @@ def test_owner_stays_the_create_value_across_the_lifecycle(tmp_path: Path) -> No
         )
         assert registry.get(TENANT_ID).owner == "alice"
         for expected, new, initiator in steps:
-            last_error = "failed" if new == TenantStatus.UPDATE_FAILED else None
+            if new in (TenantStatus.UPDATE_FAILED, TenantStatus.DESTROY_FAILED):
+                last_error = "failed"
+            else:
+                last_error = None
             registry.transition(
                 TENANT_ID,
                 expected,
@@ -489,6 +528,173 @@ def test_owner_stays_the_create_value_across_the_lifecycle(tmp_path: Path) -> No
                 _fields(initiator=initiator, last_error=last_error),
             )
             assert registry.get(TENANT_ID).owner == "alice"
+
+
+def test_new_destroy_transitions_store_the_initiator(tmp_path: Path) -> None:
+    steps = (
+        (
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROY_FAILED,
+            _initiator(InitiatorKind.AGENT, "rita"),
+        ),
+        (
+            TenantStatus.DESTROY_FAILED,
+            TenantStatus.DESTROYING,
+            _initiator(InitiatorKind.CLI, "sam"),
+        ),
+        (
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROYED,
+            _initiator(InitiatorKind.AGENT, "tina"),
+        ),
+    )
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T0)) as registry:
+        registry.create_tenant(_record())
+        _walk(registry, TENANT_ID, TenantStatus.DESTROYING)
+        for expected, new, initiator in steps:
+            last_error = "failed" if new is TenantStatus.DESTROY_FAILED else None
+            registry.transition(
+                TENANT_ID,
+                expected,
+                new,
+                _fields(initiator=initiator, last_error=last_error),
+            )
+            assert registry.get(TENANT_ID).initiator == initiator
+
+
+def test_destroy_failed_keeps_manifest_and_stores_truncated_error(
+    tmp_path: Path,
+) -> None:
+    error = "destroy-failed:" + ("x" * ERROR_TEXT_LIMIT)
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T0, T1)) as registry:
+        registry.create_tenant(
+            _record(manifest=APPLIED_MANIFEST, catalog_version="catalog-1")
+        )
+        _walk(
+            registry,
+            TENANT_ID,
+            TenantStatus.DESTROYING,
+            manifest=APPLIED_MANIFEST,
+            catalog_version="catalog-1",
+        )
+        registry.transition(
+            TENANT_ID,
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROY_FAILED,
+            _fields(
+                manifest=REPLACEMENT_MANIFEST,
+                catalog_version="catalog-2",
+                last_error=error,
+            ),
+        )
+        stored = registry.get(TENANT_ID)
+
+    assert stored.status == TenantStatus.DESTROY_FAILED
+    assert stored.manifest == APPLIED_MANIFEST
+    assert stored.catalog_version == "catalog-1"
+    assert stored.last_error == truncate_error(error)
+    assert stored.last_error is not None
+    assert len(stored.last_error) < len(error)
+
+
+def test_destroyed_clears_last_error(tmp_path: Path) -> None:
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T0, T1)) as registry:
+        registry.create_tenant(_record())
+        _walk(registry, TENANT_ID, TenantStatus.DESTROYING)
+        registry.transition(
+            TENANT_ID,
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROY_FAILED,
+            _fields(last_error="stack failed"),
+        )
+        registry.transition(
+            TENANT_ID,
+            TenantStatus.DESTROY_FAILED,
+            TenantStatus.DESTROYING,
+            _fields(last_error="stack failed"),
+        )
+        assert registry.get(TENANT_ID).last_error == "stack failed"
+        registry.transition(
+            TENANT_ID,
+            TenantStatus.DESTROYING,
+            TenantStatus.DESTROYED,
+            _fields(last_error="should-clear"),
+        )
+        stored = registry.get(TENANT_ID)
+
+    assert stored.status == TenantStatus.DESTROYED
+    assert stored.last_error is None
+
+
+def test_two_connections_racing_destroy_failed_to_destroying_let_exactly_one_succeed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T0)) as registry:
+        registry.create_tenant(_record())
+        _walk(registry, TENANT_ID, TenantStatus.DESTROY_FAILED)
+
+    barrier = threading.Barrier(2)
+
+    def attempt() -> bool:
+        with SqliteRegistry(path, _clock(T1)) as registry:
+            barrier.wait(timeout=10)
+            try:
+                registry.transition(
+                    TENANT_ID,
+                    TenantStatus.DESTROY_FAILED,
+                    TenantStatus.DESTROYING,
+                    _fields(),
+                )
+            except TransitionRejectedError:
+                return False
+            return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(attempt) for _ in range(2)]
+        outcomes = [future.result(timeout=10) for future in futures]
+
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == 1
+
+    with SqliteRegistry(path, _clock(T0)) as registry:
+        assert registry.get(TENANT_ID).status == TenantStatus.DESTROYING
+
+
+def test_create_of_a_destroyed_tenant_id_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T0)) as registry:
+        registry.create_tenant(_record(catalog_version="catalog-1"))
+        _walk(registry, TENANT_ID, TenantStatus.DESTROYED)
+        destroyed = registry.get(TENANT_ID)
+        with pytest.raises(DuplicateTenantError):
+            registry.create_tenant(_record(catalog_version="catalog-2"))
+        assert registry.get(TENANT_ID) == destroyed
+
+
+@pytest.mark.parametrize("new", list(TenantStatus), ids=lambda status: status.value)
+def test_no_transition_leaves_destroyed(tmp_path: Path, new: TenantStatus) -> None:
+    path = tmp_path / "registry.sqlite"
+    with SqliteRegistry(path, _clock(T1)) as registry:
+        registry.create_tenant(_record(last_error="kept"))
+        _walk(registry, TENANT_ID, TenantStatus.DESTROYED)
+        before = registry.get(TENANT_ID)
+        with pytest.raises(TransitionRejectedError):
+            registry.transition(
+                TENANT_ID,
+                TenantStatus.DESTROYED,
+                new,
+                _fields(
+                    manifest=REPLACEMENT_MANIFEST,
+                    catalog_version="catalog-9",
+                    initiator=_initiator(InitiatorKind.AGENT, "mallory"),
+                    last_error="should-not-stick",
+                ),
+            )
+        assert registry.get(TENANT_ID) == before
 
 
 @pytest.mark.parametrize(

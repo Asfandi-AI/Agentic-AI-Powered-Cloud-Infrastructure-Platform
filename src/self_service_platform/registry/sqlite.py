@@ -187,7 +187,7 @@ def _transition_statement(
     clock: Clock,
 ) -> tuple[str, tuple[object, ...]]:
     updated_at = clock().isoformat()
-    if new is TenantStatus.UPDATE_FAILED:
+    if new in (TenantStatus.UPDATE_FAILED, TenantStatus.DESTROY_FAILED):
         return (
             _UPDATE_FAILURE,
             (
@@ -222,7 +222,9 @@ def _transition_statement(
 
 
 def _clears_last_error(expected: TenantStatus, new: TenantStatus) -> bool:
-    return expected is TenantStatus.UPDATING and new is TenantStatus.ACTIVE
+    if expected is TenantStatus.UPDATING and new is TenantStatus.ACTIVE:
+        return True
+    return expected is TenantStatus.DESTROYING and new is TenantStatus.DESTROYED
 
 
 def _raise_for_missed_update(connection: sqlite3.Connection, tenant_id: str) -> None:

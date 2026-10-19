@@ -1348,6 +1348,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
 ) -> None:
     def untouched(
         name: str,
+        expected: type[BaseException],
         catalog: Catalog,
         manifest: tuple[ManifestEntry, ...],
         proposed: Manifest,
@@ -1372,9 +1373,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
                 stored = sqlite.get(TENANT_ID)
             if stale_version:
                 plan = plan.model_copy(update={"catalog_version": "stale"})
-            with pytest.raises(
-                (ConfirmationRequiredError, StalePlanError, UpdateNotAllowedError)
-            ):
+            with pytest.raises(expected):
                 service.apply_update(plan, confirmations, _updater())
             assert calls == []
             assert sqlite.get(TENANT_ID) == stored
@@ -1383,6 +1382,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     stored_entries = tuple(_manifest().root)
     untouched(
         "missing-update.sqlite",
+        ConfirmationRequiredError,
         standard,
         stored_entries,
         _added_manifest(),
@@ -1390,6 +1390,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "yes.sqlite",
+        ConfirmationRequiredError,
         standard,
         stored_entries,
         _added_manifest(),
@@ -1401,6 +1402,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "one.sqlite",
+        ConfirmationRequiredError,
         standard,
         stored_entries,
         _added_manifest(),
@@ -1412,6 +1414,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "missing-removals.sqlite",
+        ConfirmationRequiredError,
         standard,
         stored_entries,
         _removed_manifest(),
@@ -1420,6 +1423,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     versioned = _replacement_catalog()
     untouched(
         "missing-replacement.sqlite",
+        ConfirmationRequiredError,
         versioned,
         _VERSIONED,
         _replaced_manifest(keep_jobs=True),
@@ -1427,6 +1431,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "wrong-replacement.sqlite",
+        ConfirmationRequiredError,
         versioned,
         _VERSIONED,
         _replaced_manifest(keep_jobs=True),
@@ -1438,6 +1443,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "stale-manifest.sqlite",
+        StalePlanError,
         standard,
         stored_entries,
         _added_manifest(),
@@ -1446,6 +1452,7 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "stale-version.sqlite",
+        StalePlanError,
         standard,
         stored_entries,
         _added_manifest(),
@@ -1454,12 +1461,42 @@ def test_refused_applies_leave_the_registry_and_executor_untouched(
     )
     untouched(
         "now-updating.sqlite",
+        UpdateNotAllowedError,
         standard,
         stored_entries,
         _added_manifest(),
         _confirmed(),
         rewrite=(stored_entries, TenantStatus.UPDATING),
     )
+
+
+def test_stale_plan_says_when_the_stored_manifest_no_longer_validates(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    calls: list[str] = []
+    catalog = build_catalog()
+    invalid = (ManifestEntry(type="retired", name="uploads", options={}),)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        _seed(
+            sqlite,
+            status=TenantStatus.ACTIVE,
+            manifest=tuple(_manifest().root),
+            catalog_version=catalog.catalog_version,
+        )
+        service = _update_service(sqlite, clock, catalog, calls)
+        plan = service.plan_update(TENANT_ID, _added_manifest())
+        _shift(sqlite, invalid, TenantStatus.ACTIVE)
+        stored = sqlite.get(TENANT_ID)
+
+        with pytest.raises(StalePlanError) as caught:
+            service.apply_update(plan, _confirmed(), _updater())
+
+        assert str(caught.value) == (
+            "stored manifest no longer validates against the current catalog"
+        )
+        assert calls == []
+        assert sqlite.get(TENANT_ID) == stored
 
 
 def test_stale_base_manifest_is_refused(tmp_path: Path) -> None:

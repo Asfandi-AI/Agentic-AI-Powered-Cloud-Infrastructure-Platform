@@ -10,6 +10,16 @@ Requirement 3.4 records a tenant and then provisions it. The only defined exit f
 
 The defined destroy transitions are `active` → `destroying` and `update_failed` → `destroying`. The spec defines no `destroyed` status, no `destroy_failed` status, and no transition out of `destroying`.
 
+## Decision (ours, not in the spec)
+
+`destroyed` and `destroy_failed` are not in the spec. We added `destroying` → `destroyed`, `destroying` → `destroy_failed`, and `destroy_failed` → `destroying`. Nothing leaves `destroyed`.
+
+Whether a tenant may move from `creating` to `destroying` is still open.
+
+## Sweeper and destroyed tenants
+
+A future Sweeper must skip `destroyed` tenants. Their `expires_at` stays stored for history.
+
 ## Initiator history
 
 Requirement 13.4 says the Registry records the Initiator for each create, update, and destroy. A tenant record stores one Initiator, so only the latest is kept.

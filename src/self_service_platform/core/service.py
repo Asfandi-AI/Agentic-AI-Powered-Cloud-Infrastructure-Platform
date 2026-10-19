@@ -245,8 +245,10 @@ class PlatformService:
         stored = Manifest.model_validate([entry.model_dump() for entry in entries])
         try:
             current = validate_manifest(stored, self._catalog)
-        except ManifestValidationError:
-            return False
+        except ManifestValidationError as exc:
+            raise StalePlanError(
+                "stored manifest no longer validates against the current catalog"
+            ) from exc
         return current == base
 
     def _mark_updating(self, record: TenantRecord, initiator: Initiator) -> None:

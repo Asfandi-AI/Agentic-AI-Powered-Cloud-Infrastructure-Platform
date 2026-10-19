@@ -14,6 +14,8 @@ class TenantStatus(StrEnum):
     UPDATING = "updating"
     UPDATE_FAILED = "update_failed"
     DESTROYING = "destroying"
+    DESTROY_FAILED = "destroy_failed"
+    DESTROYED = "destroyed"
 
 
 class TenantType(StrEnum):
@@ -106,6 +108,9 @@ ALLOWED_TRANSITIONS = frozenset(
         (TenantStatus.UPDATING, TenantStatus.UPDATE_FAILED),
         (TenantStatus.ACTIVE, TenantStatus.DESTROYING),
         (TenantStatus.UPDATE_FAILED, TenantStatus.DESTROYING),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROYED),
+        (TenantStatus.DESTROYING, TenantStatus.DESTROY_FAILED),
+        (TenantStatus.DESTROY_FAILED, TenantStatus.DESTROYING),
     }
 )
 
