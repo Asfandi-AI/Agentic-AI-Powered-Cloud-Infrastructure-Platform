@@ -72,3 +72,103 @@ def test_core_cli_and_catalog_stay_inside_their_boundaries() -> None:
         *_violations(_PACKAGE / "catalog", _CATALOG_MODULES, _CATALOG_PREFIXES),
     ]
     assert violations == []
+
+
+_COMPOSITION_MODULES = (
+    "self_service_platform.wiring",
+    "self_service_platform.app",
+)
+_ADAPTER_PACKAGES = (
+    "self_service_platform.registry",
+    "self_service_platform.executors",
+)
+
+
+def _is_named_module(name: str, modules: tuple[str, ...]) -> bool:
+    return any(name == module or name.startswith(f"{module}.") for module in modules)
+
+
+def _composition_violations() -> list[str]:
+    directories = (_PACKAGE / "core", _PACKAGE / "catalog", _PACKAGE / "cli")
+    found: list[str] = []
+    for directory in directories:
+        for path in _python_files(directory):
+            relative = path.relative_to(_ROOT).as_posix()
+            for statement in _import_statements(path):
+                names = _imported_names(statement)
+                if any(_is_named_module(name, _COMPOSITION_MODULES) for name in names):
+                    found.append(f"{relative}: {statement}")
+    return found
+
+
+def _adapter_allowed(path: Path) -> bool:
+    relative = path.relative_to(_PACKAGE)
+    if relative.parts[0] in {"registry", "executors"}:
+        return True
+    return relative.as_posix() == "wiring.py"
+
+
+def _adapter_violations(paths: list[Path] | None = None) -> list[str]:
+    chosen = _python_files(_PACKAGE) if paths is None else paths
+    found: list[str] = []
+    for path in chosen:
+        if _adapter_allowed(path):
+            continue
+        relative = path.relative_to(_ROOT).as_posix()
+        for statement in _import_statements(path):
+            names = _imported_names(statement)
+            if any(_is_named_module(name, _ADAPTER_PACKAGES) for name in names):
+                found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_core_catalog_and_cli_do_not_import_wiring_or_app() -> None:
+    assert _composition_violations() == []
+
+
+def test_only_wiring_imports_the_registry_and_executors_packages() -> None:
+    assert _adapter_violations() == []
+
+
+def test_cli_import_of_the_registry_package_is_rejected() -> None:
+    probe = _PACKAGE / "cli" / "_architecture_probe.py"
+    probe.write_text(
+        "import self_service_platform.registry.sqlite\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _adapter_violations([probe])
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/cli/_architecture_probe.py: "
+            "import self_service_platform.registry.sqlite"
+        )
+    ]
+
+
+def test_core_registry_import_is_allowed_and_the_package_is_not() -> None:
+    allowed = _PACKAGE / "cli" / "_architecture_core_registry.py"
+    forbidden = _PACKAGE / "cli" / "_architecture_registry_package.py"
+    allowed.write_text(
+        "import self_service_platform.core.registry\n",
+        encoding="utf-8",
+    )
+    forbidden.write_text(
+        "import self_service_platform.registry\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _adapter_violations([allowed, forbidden])
+    finally:
+        allowed.unlink(missing_ok=True)
+        forbidden.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/cli/_architecture_registry_package.py: "
+            "import self_service_platform.registry"
+        )
+    ]

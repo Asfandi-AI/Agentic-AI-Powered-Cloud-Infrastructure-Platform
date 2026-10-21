@@ -89,6 +89,9 @@ class RecordingRegistry:
     def get(self, tenant_id: str) -> TenantRecord:
         return self._inner.get(tenant_id)
 
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        return self._inner.list_tenants()
+
     def transition(
         self,
         tenant_id: str,
@@ -182,6 +185,9 @@ class ActivationFails:
 
     def get(self, tenant_id: str) -> TenantRecord:
         return self._inner.get(tenant_id)
+
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        return self._inner.list_tenants()
 
     def transition(
         self,
@@ -1108,6 +1114,9 @@ class _TransitionFails:
 
     def get(self, tenant_id: str) -> TenantRecord:
         return self._inner.get(tenant_id)
+
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        return self._inner.list_tenants()
 
     def transition(
         self,
@@ -2105,6 +2114,9 @@ class _RejectsEnteringDestroying:
     def get(self, tenant_id: str) -> TenantRecord:
         return self._inner.get(tenant_id)
 
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        return self._inner.list_tenants()
+
     def transition(
         self,
         tenant_id: str,
@@ -2128,6 +2140,9 @@ class _DestroyWriteFails:
 
     def get(self, tenant_id: str) -> TenantRecord:
         return self._inner.get(tenant_id)
+
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        return self._inner.list_tenants()
 
     def transition(
         self,

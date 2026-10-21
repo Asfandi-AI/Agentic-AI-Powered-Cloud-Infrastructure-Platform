@@ -1,9 +1,10 @@
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self
+from urllib.parse import urlparse, urlunparse
 
 from self_service_platform.core.manifest import ManifestEntry
 from self_service_platform.core.registry import Clock
@@ -11,6 +12,7 @@ from self_service_platform.core.tenant import (
     DuplicateTenantError,
     Initiator,
     InitiatorKind,
+    RegistryUnavailableError,
     TenantNotFoundError,
     TenantRecord,
     TenantStatus,
@@ -96,14 +98,39 @@ WHERE tenant_id = ?
 
 _SELECT_TENANT_EXISTS = "SELECT 1 FROM tenants WHERE tenant_id = ?"
 
+_SELECT_TENANTS = """
+SELECT
+    tenant_id,
+    tenant_type,
+    owner,
+    status,
+    manifest_json,
+    catalog_version,
+    initiator_kind,
+    initiator_owner,
+    expires_at,
+    last_error,
+    updated_at
+FROM tenants
+ORDER BY tenant_id
+"""
+
 
 class SqliteRegistry:
-    def __init__(self, path: Path, clock: Clock) -> None:
+    def __init__(self, path: Path, clock: Clock, *, read_only: bool = False) -> None:
+        self._path = path
         self._clock = clock
+        if read_only:
+            self._connection = _open_read_only_connection(path)
+            return
         self._connection = sqlite3.connect(path, timeout=5.0)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute(_CREATE_TABLE)
         self._connection.commit()
+
+    @classmethod
+    def open_read_only(cls, path: Path) -> Self:
+        return cls(path, _read_clock, read_only=True)
 
     def close(self) -> None:
         self._connection.close()
@@ -150,10 +177,20 @@ class SqliteRegistry:
         connection.commit()
 
     def get(self, tenant_id: str) -> TenantRecord:
-        row = self._connection.execute(_SELECT_TENANT, (tenant_id,)).fetchone()
+        try:
+            row = self._connection.execute(_SELECT_TENANT, (tenant_id,)).fetchone()
+        except (sqlite3.Error, OSError) as exc:
+            raise RegistryUnavailableError(self._path) from exc
         if row is None:
             raise TenantNotFoundError(f"no tenant {tenant_id}")
         return _record_from_row(row)
+
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        try:
+            rows = self._connection.execute(_SELECT_TENANTS).fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            raise RegistryUnavailableError(self._path) from exc
+        return tuple(_record_from_row(row) for row in rows)
 
     def transition(
         self,
@@ -177,6 +214,25 @@ class SqliteRegistry:
             _raise_for_missed_update(connection, tenant_id)
         connection.commit()
         return self.get(tenant_id)
+
+
+def _read_clock() -> datetime:
+    return datetime.now(UTC)
+
+
+def _read_only_uri(path: Path) -> str:
+    parsed = urlparse(path.resolve().as_uri())
+    return urlunparse(parsed._replace(query="mode=ro"))
+
+
+def _open_read_only_connection(path: Path) -> sqlite3.Connection:
+    try:
+        connection = sqlite3.connect(_read_only_uri(path), uri=True, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+    except (sqlite3.Error, OSError) as exc:
+        raise RegistryUnavailableError(path) from exc
+    return connection
 
 
 def _transition_statement(

@@ -108,6 +108,10 @@ For a type change between two components on the same AWS service, the leftover c
 
 Whether a tenant whose `expires_at` has already passed may still be updated is not defined by the spec.
 
+## State directory permissions
+
+When a later slice creates the state directory it must be user-only on POSIX systems. On Windows the default under the user profile is assumed private.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import NoReturn
@@ -12,6 +14,13 @@ from self_service_platform.core.manifest import (
     ManifestLoadError,
     load_manifest_from_file,
 )
+from self_service_platform.core.registry import Registry
+from self_service_platform.core.tenant import (
+    RegistryUnavailableError,
+    SspHomeError,
+    TenantNotFoundError,
+    TenantRecord,
+)
 from self_service_platform.core.validator import (
     ManifestValidationError,
     ValidatedManifest,
@@ -19,12 +28,16 @@ from self_service_platform.core.validator import (
 )
 
 
-def create_app(catalog: Catalog) -> typer.Typer:
+def create_app(
+    catalog: Catalog,
+    open_registry: Callable[[], Registry] | None = None,
+) -> typer.Typer:
     app = typer.Typer(
         add_completion=False,
         rich_markup_mode=None,
         pretty_exceptions_enable=False,
     )
+    registry_factory = open_registry
 
     @app.command("catalog")
     def catalog_command() -> None:
@@ -68,7 +81,148 @@ def create_app(catalog: Catalog) -> typer.Typer:
             raise typer.Exit(1)
         _print_diff(compute_diff(applied=old_manifest, proposed=new_manifest))
 
+    @app.command("tenants")
+    def tenants_command() -> None:
+        """List every tenant."""
+        registry = _open_state(registry_factory)
+        try:
+            records = _list_tenants(registry)
+        finally:
+            _close_opened(registry)
+        _echo_tenants(records)
+
+    @app.command("status")
+    def status_command(tenant_id: str) -> None:
+        """Show one tenant."""
+        registry = _open_state(registry_factory)
+        try:
+            record = _load_tenant(registry, tenant_id)
+        finally:
+            _close_opened(registry)
+        _echo_status(record)
+
     return app
+
+
+def _open_state(factory: Callable[[], Registry] | None) -> Registry:
+    if factory is None:
+        raise RuntimeError("registry is not configured")
+    try:
+        return factory()
+    except SspHomeError as exc:
+        typer.echo(f"SSP_HOME must be absolute: {exc.value}", err=True)
+        raise typer.Exit(2) from None
+    except RegistryUnavailableError as exc:
+        _reject_unreadable_state(exc)
+
+
+def _list_tenants(registry: Registry) -> tuple[TenantRecord, ...]:
+    try:
+        return registry.list_tenants()
+    except RegistryUnavailableError as exc:
+        _reject_unreadable_state(exc)
+
+
+def _load_tenant(registry: Registry, tenant_id: str) -> TenantRecord:
+    try:
+        return registry.get(tenant_id)
+    except TenantNotFoundError:
+        typer.echo(f"no such tenant: {_escape_stored(tenant_id)}", err=True)
+        raise typer.Exit(1) from None
+    except RegistryUnavailableError as exc:
+        _reject_unreadable_state(exc)
+
+
+def _reject_unreadable_state(exc: RegistryUnavailableError) -> NoReturn:
+    typer.echo(f"cannot read state: {exc.path}", err=True)
+    raise typer.Exit(2) from None
+
+
+def _close_opened(registry: Registry) -> None:
+    close = getattr(registry, "close", None)
+    if callable(close):
+        close()
+
+
+def _echo_tenants(records: tuple[TenantRecord, ...]) -> None:
+    if not records:
+        typer.echo("no tenants")
+        return
+    for record in records:
+        typer.echo(_tenant_line(record))
+
+
+def _tenant_line(record: TenantRecord) -> str:
+    return " ".join(
+        (
+            _escape_stored(record.tenant_id),
+            _escape_stored(record.status.value),
+            _escape_stored(record.tenant_type.value),
+            _escape_stored(record.owner),
+            _expires(record.expires_at),
+        )
+    )
+
+
+def _echo_status(record: TenantRecord) -> None:
+    for line in _status_lines(record):
+        typer.echo(line)
+
+
+def _status_lines(record: TenantRecord) -> tuple[str, ...]:
+    initiator = record.initiator
+    lines = [
+        f"status: {_escape_stored(record.status.value)}",
+        f"tenant_type: {_escape_stored(record.tenant_type.value)}",
+        f"owner: {_escape_stored(record.owner)}",
+        (
+            "initiator: "
+            f"{_escape_stored(initiator.kind.value)} {_escape_stored(initiator.owner)}"
+        ),
+        f"catalog_version: {_escape_stored(record.catalog_version)}",
+        f"expires_at: {_expires(record.expires_at)}",
+        f"last_error: {_error(record.last_error)}",
+    ]
+    components = tuple(
+        f"{_escape_stored(entry.name)} {_escape_stored(entry.type)}"
+        for entry in record.manifest
+    )
+    return tuple(lines) + components
+
+
+def _expires(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return value.isoformat()
+
+
+def _error(value: str | None) -> str:
+    if value is None:
+        return "-"
+    return _escape_stored(value)
+
+
+def _escape_stored(text: str) -> str:
+    return "".join(_escape_character(character) for character in text)
+
+
+def _escape_character(character: str) -> str:
+    if character == "\\":
+        return "\\\\"
+    if character == "\n":
+        return "\\n"
+    if character == "\r":
+        return "\\r"
+    if character == "\t":
+        return "\\t"
+    code = ord(character)
+    if code < 32 or code == 127:
+        return f"\\x{code:02x}"
+    if code > 126:
+        if code <= 0xFFFF:
+            return f"\\u{code:04x}"
+        return f"\\U{code:08x}"
+    return character
 
 
 def _load_manifest(path: Path, *, name_load_errors: bool = False) -> Manifest:

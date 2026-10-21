@@ -471,7 +471,7 @@ def test_pyproject_declares_the_ssp_console_script() -> None:
 
     scripts = data["project"]["scripts"]
     assert isinstance(scripts, dict)
-    assert scripts["ssp"] == "self_service_platform.cli.main:app"
+    assert scripts["ssp"] == "self_service_platform.app:app"
 
 
 def test_help_lists_commands() -> None:

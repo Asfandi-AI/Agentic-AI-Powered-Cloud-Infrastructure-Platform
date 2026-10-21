@@ -93,15 +93,19 @@ Built and usable from the CLI:
 - validate
 - estimate
 - Manifest diff
+- tenants
+- status
 
-Built as library code, not yet reachable from the CLI:
+`tenants` and `status` read `tenants.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds that file. When `SSP_HOME` is unset, the directory is `~/.ssp`.
 
-- A tenant registry stored in SQLite
-- An executor port with an in-memory fake
+Still library-only, because a persistent executor is missing and the in-memory fake forgets everything between processes:
+
+- create
+- update
+- destroy
 
 Not built yet:
 
-- create, update, and destroy commands
 - A Terraform executor or an AWS executor
 - A sweeper
 - An agent

@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -39,6 +40,22 @@ class TenantNotFoundError(Exception):
 
 class TransitionRejectedError(Exception):
     """Raised when a status change is rejected and nothing is written."""
+
+
+class RegistryUnavailableError(Exception):
+    """Raised when tenant state cannot be read or written."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(str(path))
+
+
+class SspHomeError(Exception):
+    """Raised when SSP_HOME is set and is not an absolute path."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+        super().__init__(value)
 
 
 class Initiator(BaseModel):
