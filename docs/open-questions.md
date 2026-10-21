@@ -112,6 +112,14 @@ Whether a tenant whose `expires_at` has already passed may still be updated is n
 
 When a later slice creates the state directory it must be user-only on POSIX systems. On Windows the default under the user profile is assumed private.
 
+## Local executor test hooks
+
+`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. create, update, and destroy are still not reachable from the CLI.
+
+Real cloud tools can fail halfway and leave partial resources, so `fail_next_provision` commits the resources it wrote and then raises, and the service must show them. LocalExecutor's own writes are atomic, so `fail_next_provision_atomically` raises inside the provision transaction and rolls it back, and an interrupted LocalExecutor never corrupts its state.
+
+A rolled-back first provision leaves a zero-byte database file, not a file with a SQLite header and no tables. A zero-byte file reads as no resources and no role. A non-empty file that lacks the executor tables, or is not a SQLite database, raises `ExecutorError` on read.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).

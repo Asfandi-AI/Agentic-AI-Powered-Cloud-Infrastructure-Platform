@@ -1,4 +1,6 @@
+import os
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +12,25 @@ from self_service_platform.core.tenant import TenantType
 from self_service_platform.core.validator import ValidatedManifest, validate_manifest
 from self_service_platform.executors.fake import FakeExecutor
 
-EXECUTOR_FACTORIES = [pytest.param(FakeExecutor, id="fake")]
+
+def _local_executor() -> Executor:
+    from self_service_platform.executors.local import LocalExecutor
+
+    return LocalExecutor(Path(os.environ["SSP_LOCAL_EXECUTOR_PATH"]))
+
+
+EXECUTOR_FACTORIES = [
+    pytest.param(FakeExecutor, id="fake"),
+    pytest.param(_local_executor, id="local"),
+]
+
+
+@pytest.fixture(autouse=True)
+def _local_executor_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "SSP_LOCAL_EXECUTOR_PATH",
+        str(tmp_path / "local-executor.sqlite"),
+    )
 
 
 def _manifest(*entries: tuple[str, str]) -> ValidatedManifest:
@@ -170,3 +190,18 @@ def test_type_change_leaves_one_resource_of_the_new_type(
     new_type = proposed.entries[0].component.aws_service.value
     assert previous[0].resource_type != new_type
     assert [resource.resource_type for resource in resources] == [new_type]
+
+
+@pytest.mark.parametrize("factory", EXECUTOR_FACTORIES)
+def test_destroy_empties_s3_buckets_before_deleting_them(
+    factory: Callable[[], Executor],
+) -> None:
+    request = _request(_manifest(("s3-bucket", "uploads"), ("sqs-queue", "jobs")))
+    executor = factory()
+    executor.provision(request)
+    executor.put_bucket_object(request.tenant_id, "uploads", "notes.txt")
+
+    executor.destroy(request.tenant_id)
+
+    assert executor.list_tagged_resources(request.tenant_id) == ()
+    assert executor.tenant_role_exists(request.tenant_id) is False

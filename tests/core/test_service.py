@@ -408,13 +408,19 @@ def test_duplicate_tenant_id_is_rejected_before_provision(tmp_path: Path) -> Non
         assert bundle.calls == ["create_tenant"]
 
 
+@pytest.mark.parametrize("kind", ["fake", "local"])
 def test_failed_provision_leaves_creating_and_keeps_partial_resources(
     tmp_path: Path,
+    kind: str,
 ) -> None:
     clock = MutableClock(T0)
     calls: list[str] = []
     with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
-        executor = LongProvisionError(calls)
+        executor = _long_failing_executor(
+            kind,
+            tmp_path / "local-executor.sqlite",
+            calls,
+        )
         service = PlatformService(
             catalog=build_catalog(),
             registry=sqlite,
@@ -1697,7 +1703,8 @@ def test_removed_component_resources_are_gone(tmp_path: Path) -> None:
         assert executor.list_tagged_resources(TENANT_ID, component="jobs") == ()
 
 
-def test_type_change_passes_verification(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["fake", "local"])
+def test_type_change_passes_verification(tmp_path: Path, kind: str) -> None:
     clock = MutableClock(T0)
     calls: list[str] = []
     catalog = build_catalog()
@@ -1709,7 +1716,11 @@ def test_type_change_passes_verification(tmp_path: Path) -> None:
             manifest=stored_manifest,
             catalog_version=catalog.catalog_version,
         )
-        executor = RecordingExecutor(FakeExecutor(), sqlite, calls)
+        executor = RecordingExecutor(
+            _executor_for(kind, tmp_path / "local-executor.sqlite"),
+            sqlite,
+            calls,
+        )
         service = _service(
             catalog,
             RecordingRegistry(sqlite, calls),
@@ -1997,6 +2008,36 @@ def _catalog_seed(sqlite: SqliteRegistry, status: TenantStatus) -> Catalog:
     return catalog
 
 
+def _executor_for(kind: str, path: Path) -> Executor:
+    if kind == "fake":
+        return FakeExecutor()
+    from self_service_platform.executors.local import LocalExecutor
+
+    return LocalExecutor(path)
+
+
+def _long_failing_executor(kind: str, path: Path, calls: list[str]) -> Executor:
+    if kind == "fake":
+        return LongProvisionError(calls)
+    from self_service_platform.executors.local import LocalExecutor
+
+    class _LongLocalProvision(LocalExecutor):
+        def provision(self, request: ProvisionRequest) -> None:
+            calls.append("provision")
+            try:
+                super().provision(request)
+            except ExecutorError:
+                raise ExecutorError(_LONG_ERROR) from None
+
+        def destroy(self, tenant_id: str) -> None:
+            calls.append("destroy")
+            super().destroy(tenant_id)
+
+    executor = _LongLocalProvision(path)
+    executor.fail_next_provision(after=1)
+    return executor
+
+
 def _arm(executor: FakeExecutor, catalog: Catalog) -> None:
     executor.provision(
         ProvisionRequest(
@@ -2282,12 +2323,16 @@ def test_destroying_transition_stores_the_initiator_and_keeps_the_stored_fields(
         assert during.expires_at == before.expires_at
 
 
-def test_successful_destroy_leaves_no_resources_and_no_role(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["fake", "local"])
+def test_successful_destroy_leaves_no_resources_and_no_role(
+    tmp_path: Path,
+    kind: str,
+) -> None:
     clock = MutableClock(T0)
     calls: list[str] = []
     with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
         catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
-        fake = FakeExecutor()
+        fake = _executor_for(kind, tmp_path / "local-executor.sqlite")
         _arm(fake, catalog)
         executor = RecordingExecutor(fake, sqlite, calls)
         service = _service(catalog, sqlite, executor, clock)
@@ -2305,13 +2350,15 @@ def test_successful_destroy_leaves_no_resources_and_no_role(tmp_path: Path) -> N
             result.record = result.record
 
 
+@pytest.mark.parametrize("kind", ["fake", "local"])
 def test_leftover_resource_ends_destroy_failed_and_names_the_identifier(
     tmp_path: Path,
+    kind: str,
 ) -> None:
     clock = MutableClock(T0)
     with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
         catalog = _catalog_seed(sqlite, TenantStatus.ACTIVE)
-        fake = FakeExecutor()
+        fake = _executor_for(kind, tmp_path / "local-executor.sqlite")
         _arm(fake, catalog)
         fake.leave_one_resource_on_next_destroy()
         service = _service(catalog, sqlite, fake, clock)

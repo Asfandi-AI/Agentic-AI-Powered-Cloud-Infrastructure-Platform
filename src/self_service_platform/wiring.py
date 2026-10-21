@@ -10,9 +10,11 @@ from self_service_platform.core.tenant import (
     TenantStatus,
     TransitionFields,
 )
+from self_service_platform.executors.local import LocalExecutor
 from self_service_platform.registry.sqlite import SqliteRegistry
 
 _DATABASE_NAME = "tenants.sqlite"
+_EXECUTOR_DATABASE_NAME = "local-executor.sqlite"
 
 
 def state_directory() -> Path:
@@ -33,6 +35,14 @@ def state_directory() -> Path:
 
 def database_path() -> Path:
     return state_directory() / _DATABASE_NAME
+
+
+def executor_path() -> Path:
+    return state_directory() / _EXECUTOR_DATABASE_NAME
+
+
+def build_executor() -> LocalExecutor:
+    return LocalExecutor(executor_path())
 
 
 def open_registry() -> Registry:

@@ -98,7 +98,9 @@ Built and usable from the CLI:
 
 `tenants` and `status` read `tenants.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds that file. When `SSP_HOME` is unset, the directory is `~/.ssp`.
 
-Still library-only, because a persistent executor is missing and the in-memory fake forgets everything between processes:
+`LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes.
+
+Still not reachable from the CLI:
 
 - create
 - update
