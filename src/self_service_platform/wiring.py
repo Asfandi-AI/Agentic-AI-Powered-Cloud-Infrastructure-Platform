@@ -1,7 +1,13 @@
 import os
+import sqlite3
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypeVar
 
-from self_service_platform.core.registry import Registry
+from self_service_platform.catalog.catalog import build_catalog
+from self_service_platform.core.registry import Clock, Registry
+from self_service_platform.core.service import PlatformService, TtlPolicy
 from self_service_platform.core.tenant import (
     RegistryUnavailableError,
     SspHomeError,
@@ -15,6 +21,10 @@ from self_service_platform.registry.sqlite import SqliteRegistry
 
 _DATABASE_NAME = "tenants.sqlite"
 _EXECUTOR_DATABASE_NAME = "local-executor.sqlite"
+# POC defaults. Not from the spec.
+_DEV_TTL = timedelta(days=1)
+_EPHEMERAL_TTL = timedelta(hours=3)
+_T = TypeVar("_T")
 
 
 def state_directory() -> Path:
@@ -45,6 +55,20 @@ def build_executor() -> LocalExecutor:
     return LocalExecutor(executor_path())
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def build_service() -> PlatformService:
+    return PlatformService(
+        catalog=build_catalog(),
+        registry=_WritableRegistry(database_path(), _utc_now),
+        executor=build_executor(),
+        clock=_utc_now,
+        ttl_policy=TtlPolicy(dev=_DEV_TTL, ephemeral=_EPHEMERAL_TTL),
+    )
+
+
 def open_registry() -> Registry:
     path = database_path()
     if path.exists() and not path.is_file():
@@ -52,6 +76,67 @@ def open_registry() -> Registry:
     if not path.is_file():
         return _MissingState(path)
     return SqliteRegistry.open_read_only(path)
+
+
+class _WritableRegistry:
+    def __init__(self, path: Path, clock: Clock) -> None:
+        self._path = path
+        self._clock = clock
+
+    def create_tenant(self, record: TenantRecord) -> None:
+        self._call(lambda registry: registry.create_tenant(record))
+
+    def get(self, tenant_id: str) -> TenantRecord:
+        return self._call(lambda registry: registry.get(tenant_id))
+
+    def list_tenants(self) -> tuple[TenantRecord, ...]:
+        return self._call(lambda registry: registry.list_tenants())
+
+    def transition(
+        self,
+        tenant_id: str,
+        expected: TenantStatus,
+        new: TenantStatus,
+        fields: TransitionFields,
+    ) -> TenantRecord:
+        return self._call(
+            lambda registry: registry.transition(tenant_id, expected, new, fields)
+        )
+
+    def _call(self, work: Callable[[SqliteRegistry], _T]) -> _T:
+        registry = self._open()
+        try:
+            return work(registry)
+        except sqlite3.OperationalError as exc:
+            raise RegistryUnavailableError(self._path) from exc
+        finally:
+            registry.close()
+
+    def _open(self) -> SqliteRegistry:
+        _prepare_database(self._path)
+        try:
+            return SqliteRegistry(self._path, self._clock)
+        except OSError as exc:
+            raise RegistryUnavailableError(self._path) from exc
+        except sqlite3.OperationalError as exc:
+            raise RegistryUnavailableError(self._path) from exc
+
+
+def _prepare_database(path: Path) -> None:
+    if path.exists() and not path.is_file():
+        raise RegistryUnavailableError(path)
+    directory = path.parent
+    if directory.exists():
+        return
+    try:
+        directory.mkdir(parents=True, mode=0o700)
+    except OSError as exc:
+        raise RegistryUnavailableError(path) from exc
+    if os.name == "posix":
+        try:
+            directory.chmod(0o700)
+        except OSError as exc:
+            raise RegistryUnavailableError(path) from exc
 
 
 class _MissingState:

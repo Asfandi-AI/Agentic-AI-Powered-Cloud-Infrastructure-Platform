@@ -62,7 +62,7 @@ This create path requires a Manifest, so the Default_Manifest in Requirement 3.2
 
 ## AWS resource names
 
-The Tenant_Id format and the AWS naming limits are unknown, so Requirement 2.3 is not enforced for a name that would violate those limits.
+The Tenant_Id format and the AWS naming limits are unknown, so Requirement 2.3 is not enforced for a name that would violate those limits. `ssp create` rejects only an empty or whitespace-only id, and any id that contains a control character. It does not define a Tenant_Id format.
 
 ## Owner column
 
@@ -110,15 +110,23 @@ Whether a tenant whose `expires_at` has already passed may still be updated is n
 
 ## State directory permissions
 
-When a later slice creates the state directory it must be user-only on POSIX systems. On Windows the default under the user profile is assumed private.
+The create command's first write creates the state directory. It is user-only (`0o700`) on POSIX systems. On Windows the default under the user profile is assumed private.
 
 ## Local executor test hooks
 
-`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. create, update, and destroy are still not reachable from the CLI.
+`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. update and destroy are still not reachable from the CLI.
 
 Real cloud tools can fail halfway and leave partial resources, so `fail_next_provision` commits the resources it wrote and then raises, and the service must show them. LocalExecutor's own writes are atomic, so `fail_next_provision_atomically` raises inside the provision transaction and rolls it back, and an interrupted LocalExecutor never corrupts its state.
 
 A rolled-back first provision leaves a zero-byte database file, not a file with a SQLite header and no tables. A zero-byte file reads as no resources and no role. A non-empty file that lacks the executor tables, or is not a SQLite database, raises `ExecutorError` on read.
+
+## Decision (ours, not in the spec): create TTL
+
+Dev tenants expire after 1 day. Ephemeral tenants expire after 3 hours. Prod tenants do not expire. These durations are POC defaults, not from the spec.
+
+## CLI initiator
+
+`ssp create` records an Initiator with kind `cli` and owner set to the operating-system user from `getpass.getuser()`. There is no authentication, so this identity is only as trustworthy as the local user. `--owner` is the tenant owner, a different field.
 
 ## Decided
 

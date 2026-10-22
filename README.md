@@ -85,6 +85,83 @@ position 2 jobs: unknown option foo
 
 The two commands on examples/invalid-manifest.yaml print those issues on stderr and exit with status 1.
 
+## Try it
+
+`create` stores the tenant under `SSP_HOME` and records resources with `LocalExecutor`. That executor is a local simulation. It is not AWS. `SSP_HOME` must be an absolute directory. The transcript below was captured with `SSP_HOME` set to a temporary directory outside this project. That directory was deleted afterwards. `update` and `destroy` are not available from the CLI yet.
+
+```text
+uv run ssp create demo examples/valid-manifest.yaml --type dev --owner alice --plan-only
+```
+
+```text
+tenant_id: demo
+tenant_type: dev
+owner: alice
+uploads s3-bucket
+  S3 storage not priced
+  total: not priced
+jobs sqs-queue
+  SQS requests not priced
+  total: not priced
+manifest total: not priced
+POC heuristic
+expires_at: 2026-10-22T09:59:37.957317+00:00
+plan only: nothing was written
+```
+
+```text
+uv run ssp create demo examples/valid-manifest.yaml --type dev --owner alice --yes
+```
+
+```text
+tenant_id: demo
+tenant_type: dev
+owner: alice
+uploads s3-bucket
+  S3 storage not priced
+  total: not priced
+jobs sqs-queue
+  SQS requests not priced
+  total: not priced
+manifest total: not priced
+POC heuristic
+expires_at: 2026-10-22T09:59:38.880765+00:00
+created: demo status active
+status: active
+tenant_type: dev
+owner: alice
+initiator: cli REDACTED
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2026-10-22T09:59:38.880765+00:00
+last_error: -
+uploads s3-bucket
+jobs sqs-queue
+```
+
+```text
+uv run ssp tenants
+```
+
+```text
+demo active dev alice 2026-10-22T09:59:38.880765+00:00
+```
+
+```text
+uv run ssp status demo
+```
+
+```text
+status: active
+tenant_type: dev
+owner: alice
+initiator: cli REDACTED
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2026-10-22T09:59:38.880765+00:00
+last_error: -
+uploads s3-bucket
+jobs sqs-queue
+```
+
 ## Status
 
 Built and usable from the CLI:
@@ -95,14 +172,14 @@ Built and usable from the CLI:
 - Manifest diff
 - tenants
 - status
+- create
 
-`tenants` and `status` read `tenants.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds that file. When `SSP_HOME` is unset, the directory is `~/.ssp`.
+`tenants` and `status` read `tenants.sqlite`. `create` writes that file and `local-executor.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds those files. When `SSP_HOME` is unset, the directory is `~/.ssp`.
 
 `LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes.
 
 Still not reachable from the CLI:
 
-- create
 - update
 - destroy
 

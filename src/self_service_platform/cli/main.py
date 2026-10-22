@@ -1,3 +1,5 @@
+import getpass
+import sys
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
@@ -15,11 +17,22 @@ from self_service_platform.core.manifest import (
     load_manifest_from_file,
 )
 from self_service_platform.core.registry import Registry
+from self_service_platform.core.service import (
+    ConfirmationRequiredError,
+    CreatePlan,
+    PlatformService,
+    ProvisionFailedError,
+    StalePlanError,
+)
 from self_service_platform.core.tenant import (
+    DuplicateTenantError,
+    Initiator,
+    InitiatorKind,
     RegistryUnavailableError,
     SspHomeError,
     TenantNotFoundError,
     TenantRecord,
+    TenantType,
 )
 from self_service_platform.core.validator import (
     ManifestValidationError,
@@ -31,6 +44,7 @@ from self_service_platform.core.validator import (
 def create_app(
     catalog: Catalog,
     open_registry: Callable[[], Registry] | None = None,
+    open_service: Callable[[], PlatformService] | None = None,
 ) -> typer.Typer:
     app = typer.Typer(
         add_completion=False,
@@ -38,6 +52,7 @@ def create_app(
         pretty_exceptions_enable=False,
     )
     registry_factory = open_registry
+    service_factory = open_service
 
     @app.command("catalog")
     def catalog_command() -> None:
@@ -100,6 +115,32 @@ def create_app(
         finally:
             _close_opened(registry)
         _echo_status(record)
+
+    @app.command("create")
+    def create_command(
+        tenant_id: str,
+        manifest_path: Path,
+        tenant_type: TenantType = _TENANT_TYPE,
+        owner: str = _OWNER,
+        yes: bool = _YES,
+        plan_only: bool = _PLAN_ONLY,
+    ) -> None:
+        """Create a tenant from a manifest."""
+        _reject_tenant_id(tenant_id)
+        _reject_owner(owner)
+        username = _operating_system_user()
+        manifest = _load_manifest(manifest_path)
+        _require_valid_manifest(manifest, catalog)
+        service = _open_service(service_factory)
+        plan = _plan_create(service, tenant_id, tenant_type, owner, manifest)
+        _print_create_plan(plan)
+        if plan_only:
+            typer.echo("plan only: nothing was written")
+            return
+        if not _create_confirmed(yes):
+            raise typer.Exit(1)
+        record = _apply_create(service, plan, _cli_initiator(username))
+        _echo_created(record)
 
     return app
 
@@ -225,6 +266,152 @@ def _escape_character(character: str) -> str:
     return character
 
 
+def _reject_tenant_id(tenant_id: str) -> None:
+    if _rejected_text(tenant_id):
+        typer.echo(f"invalid tenant id: {_escape_stored(tenant_id)}", err=True)
+        raise typer.Exit(2)
+
+
+def _reject_owner(owner: str) -> None:
+    if _rejected_text(owner):
+        typer.echo(f"invalid owner: {_escape_stored(owner)}", err=True)
+        raise typer.Exit(2)
+
+
+def _rejected_text(value: str) -> bool:
+    if value.strip() == "":
+        return True
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _operating_system_user() -> str:
+    try:
+        username = getpass.getuser()
+    except Exception:  # noqa: BLE001
+        _reject_unknown_user()
+    if username.strip() == "":
+        _reject_unknown_user()
+    return username
+
+
+def _reject_unknown_user() -> NoReturn:
+    typer.echo("cannot determine the operating system user", err=True)
+    raise typer.Exit(2)
+
+
+def _stdin_is_terminal() -> bool:
+    return sys.stdin.isatty()
+
+
+def _open_service(factory: Callable[[], PlatformService] | None) -> PlatformService:
+    if factory is None:
+        raise RuntimeError("service is not configured")
+    try:
+        return factory()
+    except SspHomeError as exc:
+        typer.echo(f"SSP_HOME must be absolute: {exc.value}", err=True)
+        raise typer.Exit(2) from None
+
+
+def _require_valid_manifest(manifest: Manifest, catalog: Catalog) -> None:
+    try:
+        validate_manifest(manifest, catalog)
+    except ManifestValidationError as exc:
+        _report_create_issues(exc)
+
+
+def _plan_create(
+    service: PlatformService,
+    tenant_id: str,
+    tenant_type: TenantType,
+    owner: str,
+    manifest: Manifest,
+) -> CreatePlan:
+    try:
+        return service.plan_create(tenant_id, tenant_type, owner, manifest)
+    except ManifestValidationError as exc:
+        _report_create_issues(exc)
+
+
+def _print_create_plan(plan: CreatePlan) -> None:
+    typer.echo(f"tenant_id: {_escape_stored(plan.tenant_id)}")
+    typer.echo(f"tenant_type: {_escape_stored(plan.tenant_type.value)}")
+    typer.echo(f"owner: {_escape_stored(plan.owner)}")
+    _print_plan_estimate(plan.estimated_cost)
+    typer.echo(f"expires_at: {_expires(plan.expires_at)}")
+
+
+def _print_plan_estimate(estimate: EstimatedCost) -> None:
+    for component in estimate.components:
+        name = _escape_stored(component.name)
+        component_type = _escape_stored(component.component_type)
+        typer.echo(f"{name} {component_type}")
+        for item in component.line_items:
+            description = _escape_stored(item.description)
+            typer.echo(f"  {description} {_format_amount(item.amount)}")
+        typer.echo(f"  total: {_format_amount(component.total)}")
+    typer.echo(f"manifest total: {_format_amount(estimate.total)}")
+    typer.echo(estimate.label)
+
+
+def _create_confirmed(yes: bool) -> bool:
+    if yes:
+        return True
+    if not _stdin_is_terminal():
+        typer.echo("confirmation required; pass --yes", err=True)
+        raise typer.Exit(1)
+    typer.echo("Create this tenant? [y/N]")
+    try:
+        answer = input()
+    except EOFError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+def _cli_initiator(username: str) -> Initiator:
+    return Initiator(kind=InitiatorKind.CLI, owner=username)
+
+
+def _apply_create(
+    service: PlatformService,
+    plan: CreatePlan,
+    initiator: Initiator,
+) -> TenantRecord:
+    try:
+        return service.apply_create(plan, True, initiator).record
+    except ManifestValidationError as exc:
+        _report_create_issues(exc)
+    except (ConfirmationRequiredError, StalePlanError, DuplicateTenantError) as exc:
+        typer.echo(_escape_stored(str(exc)), err=True)
+        raise typer.Exit(1) from None
+    except ProvisionFailedError as exc:
+        typer.echo(_escape_stored(str(exc)), err=True)
+        tenant_id = _escape_stored(plan.tenant_id)
+        typer.echo(
+            f"tenant is left in status creating; see ssp status {tenant_id}",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    except RegistryUnavailableError as exc:
+        typer.echo(f"cannot write state: {exc.path}", err=True)
+        raise typer.Exit(2) from None
+
+
+def _echo_created(record: TenantRecord) -> None:
+    tenant_id = _escape_stored(record.tenant_id)
+    status = _escape_stored(record.status.value)
+    typer.echo(f"created: {tenant_id} status {status}")
+    _echo_status(record)
+
+
+def _report_create_issues(error: ManifestValidationError) -> NoReturn:
+    for issue in error.issues:
+        name = _escape_stored(issue.name)
+        message = _escape_stored(issue.message)
+        typer.echo(f"position {issue.position} {name}: {message}", err=True)
+    raise typer.Exit(1)
+
+
 def _load_manifest(path: Path, *, name_load_errors: bool = False) -> Manifest:
     try:
         return load_manifest_from_file(path)
@@ -297,6 +484,12 @@ def _print_estimate(estimate: EstimatedCost) -> None:
         typer.echo(f"  total: {_format_amount(component.total)}")
     typer.echo(f"manifest total: {_format_amount(estimate.total)}")
     typer.echo(estimate.label)
+
+
+_TENANT_TYPE = typer.Option(..., "--type")
+_OWNER = typer.Option(...)
+_YES = typer.Option(False, "--yes")
+_PLAN_ONLY = typer.Option(False, "--plan-only")
 
 
 app = create_app(build_catalog())
