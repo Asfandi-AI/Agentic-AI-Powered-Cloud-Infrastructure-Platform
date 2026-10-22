@@ -172,3 +172,32 @@ def test_core_registry_import_is_allowed_and_the_package_is_not() -> None:
             "import self_service_platform.registry"
         )
     ]
+
+
+def test_cli_import_of_wiring_is_rejected() -> None:
+    probe = _PACKAGE / "cli" / "_architecture_wiring.py"
+    probe.write_text("import self_service_platform.wiring\n", encoding="utf-8")
+    try:
+        violations = _composition_violations()
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/cli/_architecture_wiring.py: "
+            "import self_service_platform.wiring"
+        )
+    ]
+
+
+def test_cli_import_of_sqlite3_is_rejected() -> None:
+    probe = _PACKAGE / "cli" / "_architecture_sqlite.py"
+    probe.write_text("import sqlite3\n", encoding="utf-8")
+    try:
+        violations = _violations(_PACKAGE / "cli", _CORE_MODULES, _CORE_PREFIXES)
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        "src/self_service_platform/cli/_architecture_sqlite.py: import sqlite3"
+    ]

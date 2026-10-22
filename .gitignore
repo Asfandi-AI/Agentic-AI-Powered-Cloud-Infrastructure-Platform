@@ -10,3 +10,7 @@ __pycache__/
 *.tfstate.backup
 .terraform/
 .DS_Store
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
