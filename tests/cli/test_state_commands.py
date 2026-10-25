@@ -411,8 +411,7 @@ def test_literal_backslash_differs_from_a_newline(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert result.stdout == (
-        f"a\\n active dev alice {_EXPIRES}\n"
-        f"a\\\\n active dev alice {_EXPIRES}\n"
+        f"a\\n active dev alice {_EXPIRES}\na\\\\n active dev alice {_EXPIRES}\n"
     )
 
 
