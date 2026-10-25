@@ -36,13 +36,19 @@ def _imported_names(statement: str) -> list[str]:
     for node in ast.walk(ast.parse(statement)):
         if isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.level == 0
+        ):
             names.append(node.module)
             names.extend(f"{node.module}.{alias.name}" for alias in node.names)
     return names
 
 
-def _forbidden(names: list[str], modules: frozenset[str], prefixes: tuple[str, ...]) -> bool:
+def _forbidden(
+    names: list[str], modules: frozenset[str], prefixes: tuple[str, ...]
+) -> bool:
     for name in names:
         if name.split(".", 1)[0] in modules:
             return True
