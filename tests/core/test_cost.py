@@ -136,9 +136,7 @@ def test_zero_amount_is_priced() -> None:
         aws_service=AwsService.SQS,
     )
 
-    estimate = estimate_cost(
-        _manifest(_entry("uploads", zero), _entry("jobs", priced))
-    )
+    estimate = estimate_cost(_manifest(_entry("uploads", zero), _entry("jobs", priced)))
 
     assert estimate.components[0].total is not None
     assert estimate.components[0].total == Decimal(0)
