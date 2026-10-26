@@ -87,10 +87,18 @@ class _WritableRegistry:
         self._call(lambda registry: registry.create_tenant(record))
 
     def get(self, tenant_id: str) -> TenantRecord:
-        return self._call(lambda registry: registry.get(tenant_id))
+        if not self._path.is_file():
+            if self._path.exists():
+                raise RegistryUnavailableError(self._path)
+            raise TenantNotFoundError(f"no tenant {tenant_id}")
+        return self._read(lambda registry: registry.get(tenant_id))
 
     def list_tenants(self) -> tuple[TenantRecord, ...]:
-        return self._call(lambda registry: registry.list_tenants())
+        if not self._path.is_file():
+            if self._path.exists():
+                raise RegistryUnavailableError(self._path)
+            return ()
+        return self._read(lambda registry: registry.list_tenants())
 
     def transition(
         self,
@@ -120,6 +128,18 @@ class _WritableRegistry:
             raise RegistryUnavailableError(self._path) from exc
         except sqlite3.OperationalError as exc:
             raise RegistryUnavailableError(self._path) from exc
+
+    def _read(self, work: Callable[[SqliteRegistry], _T]) -> _T:
+        try:
+            registry = SqliteRegistry.open_read_only(self._path)
+        except (OSError, sqlite3.Error) as exc:
+            raise RegistryUnavailableError(self._path) from exc
+        try:
+            return work(registry)
+        except sqlite3.Error as exc:
+            raise RegistryUnavailableError(self._path) from exc
+        finally:
+            registry.close()
 
 
 def _prepare_database(path: Path) -> None:

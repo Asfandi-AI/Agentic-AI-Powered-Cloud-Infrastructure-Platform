@@ -1,0 +1,6 @@
+- type: s3-bucket
+  name: uploads
+- type: sqs-queue
+  name: jobs
+- type: sqs-queue
+  name: reports
