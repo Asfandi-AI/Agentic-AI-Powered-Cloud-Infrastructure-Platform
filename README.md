@@ -87,27 +87,7 @@ The two commands on examples/invalid-manifest.yaml print those issues on stderr 
 
 ## Try it
 
-`create` stores the tenant under `SSP_HOME` and records resources with `LocalExecutor`. That executor is a local simulation. It is not AWS. `SSP_HOME` must be an absolute directory. The transcript below was captured with `SSP_HOME` set to a temporary directory outside this project. That directory was deleted afterwards. `update` and `destroy` are not available from the CLI yet.
-
-```text
-uv run ssp create demo examples/valid-manifest.yaml --type dev --owner alice --plan-only
-```
-
-```text
-tenant_id: demo
-tenant_type: dev
-owner: alice
-uploads s3-bucket
-  S3 storage not priced
-  total: not priced
-jobs sqs-queue
-  SQS requests not priced
-  total: not priced
-manifest total: not priced
-POC heuristic
-expires_at: 2026-10-22T09:59:37.957317+00:00
-plan only: nothing was written
-```
+`create`, `update`, and `destroy` store the tenant under `SSP_HOME` and record resources with `LocalExecutor`. That executor is a local simulation. It is not AWS. `SSP_HOME` must be an absolute directory. The transcript below was captured with `SSP_HOME` set to a temporary directory outside this project. That directory was deleted afterwards.
 
 ```text
 uv run ssp create demo examples/valid-manifest.yaml --type dev --owner alice --yes
@@ -125,25 +105,83 @@ jobs sqs-queue
   total: not priced
 manifest total: not priced
 POC heuristic
-expires_at: 2026-10-22T09:59:38.880765+00:00
+expires_at: 2026-10-24T09:09:57.758725+00:00
 created: demo status active
 status: active
 tenant_type: dev
 owner: alice
-initiator: cli AFAKHER
+initiator: cli demo
 catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
-expires_at: 2026-10-22T09:59:38.880765+00:00
+expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
 jobs sqs-queue
 ```
 
 ```text
-uv run ssp tenants
+uv run ssp update demo examples/added-manifest.yaml --yes
 ```
 
 ```text
-demo active dev alice 2026-10-22T09:59:38.880765+00:00
+tenant_id: demo
+status: active
+added: reports sqs-queue
+summary: 1 added, 0 removed, 0 changed
+uploads s3-bucket
+  S3 storage not priced
+  total: not priced
+jobs sqs-queue
+  SQS requests not priced
+  total: not priced
+reports sqs-queue
+  SQS requests not priced
+  total: not priced
+manifest total: not priced
+POC heuristic
+removals: -
+replacements: -
+updated: demo status active
+status: active
+tenant_type: dev
+owner: alice
+initiator: cli demo
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2026-10-24T09:09:57.758725+00:00
+last_error: -
+uploads s3-bucket
+jobs sqs-queue
+reports sqs-queue
+```
+
+```text
+uv run ssp update demo examples/updated-manifest.yaml --yes --confirm-removals
+```
+
+```text
+tenant_id: demo
+status: active
+removed: jobs sqs-queue (data in this component will be deleted)
+summary: 0 added, 1 removed, 0 changed
+uploads s3-bucket
+  S3 storage not priced
+  total: not priced
+reports sqs-queue
+  SQS requests not priced
+  total: not priced
+manifest total: not priced
+POC heuristic
+removals: jobs
+replacements: -
+updated: demo status active
+status: active
+tenant_type: dev
+owner: alice
+initiator: cli demo
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2026-10-24T09:09:57.758725+00:00
+last_error: -
+uploads s3-bucket
+reports sqs-queue
 ```
 
 ```text
@@ -154,12 +192,59 @@ uv run ssp status demo
 status: active
 tenant_type: dev
 owner: alice
-initiator: cli AFAKHER
+initiator: cli demo
 catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
-expires_at: 2026-10-22T09:59:38.880765+00:00
+expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
-jobs sqs-queue
+reports sqs-queue
+```
+
+```text
+uv run ssp destroy demo --yes
+```
+
+```text
+tenant_id: demo
+tenant_type: dev
+status: active
+uploads
+reports
+all resources and data of the tenant will be deleted
+destroyed: demo status destroyed
+status: destroyed
+tenant_type: dev
+owner: alice
+initiator: cli demo
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2026-10-24T09:09:57.758725+00:00
+last_error: -
+uploads s3-bucket
+reports sqs-queue
+```
+
+```text
+uv run ssp tenants
+```
+
+```text
+demo destroyed dev alice 2026-10-24T09:09:57.758725+00:00
+```
+
+```text
+uv run ssp status demo
+```
+
+```text
+status: destroyed
+tenant_type: dev
+owner: alice
+initiator: cli demo
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2026-10-24T09:09:57.758725+00:00
+last_error: -
+uploads s3-bucket
+reports sqs-queue
 ```
 
 ## Status
@@ -173,15 +258,12 @@ Built and usable from the CLI:
 - tenants
 - status
 - create
-
-`tenants` and `status` read `tenants.sqlite`. `create` writes that file and `local-executor.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds those files. When `SSP_HOME` is unset, the directory is `~/.ssp`.
-
-`LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes.
-
-Still not reachable from the CLI:
-
 - update
 - destroy
+
+`tenants` and `status` read `tenants.sqlite`. `create`, `update`, and `destroy` write that file and `local-executor.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds those files. When `SSP_HOME` is unset, the directory is `~/.ssp`.
+
+`LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes. `create`, `update`, and `destroy` use that simulation. They do not call AWS.
 
 Not built yet:
 

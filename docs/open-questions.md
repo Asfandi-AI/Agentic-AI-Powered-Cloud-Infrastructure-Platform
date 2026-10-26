@@ -54,7 +54,7 @@ The currency or unit of amounts is not specified.
 
 ## Diff confirmation
 
-The CLI `diff` command only reports, so it does not ask for the confirmations in Requirements 4.3 and 4.9. `apply_update` requires those confirmations.
+The CLI `diff` command only reports, so it does not ask for the confirmations in Requirements 4.3 and 4.9. `ssp update` asks for them. `--yes` is only the update confirmation. Removals and replacements need their own flags, or their own prompts when stdin is a terminal.
 
 ## Manifest required on create
 
@@ -114,7 +114,7 @@ The create command's first write creates the state directory. It is user-only (`
 
 ## Local executor test hooks
 
-`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. update and destroy are still not reachable from the CLI.
+`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. `ssp update` and `ssp destroy` use that simulation. They do not call AWS.
 
 Real cloud tools can fail halfway and leave partial resources, so `fail_next_provision` commits the resources it wrote and then raises, and the service must show them. LocalExecutor's own writes are atomic, so `fail_next_provision_atomically` raises inside the provision transaction and rolls it back, and an interrupted LocalExecutor never corrupts its state.
 
@@ -126,7 +126,13 @@ Dev tenants expire after 1 day. Ephemeral tenants expire after 3 hours. Prod ten
 
 ## CLI initiator
 
-`ssp create` records an Initiator with kind `cli` and owner set to the operating-system user from `getpass.getuser()`. There is no authentication, so this identity is only as trustworthy as the local user. `--owner` is the tenant owner, a different field.
+`ssp create`, `ssp update`, and `ssp destroy` record an Initiator with kind `cli` and owner set to the operating-system user from `getpass.getuser()`. There is no authentication, so this identity is only as trustworthy as the local user. `--owner` on create is the tenant owner, a different field.
+
+`--yes` confirms the update itself and nothing else. Removing a component also needs `--confirm-removals`. Each replacement needs its own `--confirm-replacement NAME`. Those flags are not implied by `--yes`.
+
+Interactive destroy accepts only the exact tenant id, case-sensitive, without stripping surrounding whitespace. A tenant id that contains a control character, or is not printable ASCII, cannot be confirmed by typing it. The command tells the user to pass `--yes` and does not read stdin.
+
+If another process wins the registry's conditional write, `apply_update` and `apply_destroy` raise `TransitionRejectedError`. The CLI prints `tenant changed while the command was running; no change was made by this command` and exits 1. It does not catch any other exception from the executor.
 
 ## Decided
 
