@@ -207,3 +207,50 @@ def test_cli_import_of_sqlite3_is_rejected() -> None:
     assert violations == [
         "src/self_service_platform/cli/_architecture_sqlite.py: import sqlite3"
     ]
+
+
+_SWEEPER_MODULES = frozenset({"sqlite3"})
+_SWEEPER_PREFIXES = (
+    "self_service_platform.executors",
+    "self_service_platform.registry",
+)
+
+
+def _sweeper_import_violations(path: Path) -> list[str]:
+    relative = path.relative_to(_ROOT).as_posix()
+    found: list[str] = []
+    for statement in _import_statements(path):
+        names = _imported_names(statement)
+        if _forbidden(names, _SWEEPER_MODULES, _SWEEPER_PREFIXES):
+            found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_sweeper_does_not_import_executors_registry_or_sqlite() -> None:
+    assert _sweeper_import_violations(_PACKAGE / "core" / "sweeper.py") == []
+
+
+def test_sweeper_import_of_executors_registry_or_sqlite_is_rejected() -> None:
+    probe = _PACKAGE / "core" / "_architecture_sweeper.py"
+    probe.write_text(
+        "import sqlite3\n"
+        "import self_service_platform.executors\n"
+        "import self_service_platform.registry\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _sweeper_import_violations(probe)
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        "src/self_service_platform/core/_architecture_sweeper.py: import sqlite3",
+        (
+            "src/self_service_platform/core/_architecture_sweeper.py: "
+            "import self_service_platform.executors"
+        ),
+        (
+            "src/self_service_platform/core/_architecture_sweeper.py: "
+            "import self_service_platform.registry"
+        ),
+    ]

@@ -1,7 +1,7 @@
 import getpass
 import sys
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import NoReturn
@@ -16,7 +16,7 @@ from self_service_platform.core.manifest import (
     ManifestLoadError,
     load_manifest_from_file,
 )
-from self_service_platform.core.registry import Registry
+from self_service_platform.core.registry import Clock, Registry
 from self_service_platform.core.service import (
     ConfirmationRequiredError,
     CreatePlan,
@@ -32,6 +32,7 @@ from self_service_platform.core.service import (
     UpdateNotAllowedError,
     UpdatePlan,
 )
+from self_service_platform.core.sweeper import Sweeper, SweepOutcome, SweepReport
 from self_service_platform.core.tenant import (
     DuplicateTenantError,
     Initiator,
@@ -55,6 +56,7 @@ def create_app(
     catalog: Catalog,
     open_registry: Callable[[], Registry] | None = None,
     open_service: Callable[[], PlatformService] | None = None,
+    clock: Clock | None = None,
 ) -> typer.Typer:
     app = typer.Typer(
         add_completion=False,
@@ -63,6 +65,7 @@ def create_app(
     )
     registry_factory = open_registry
     service_factory = open_service
+    sweep_clock = _utc_now if clock is None else clock
 
     @app.command("catalog")
     def catalog_command() -> None:
@@ -202,7 +205,90 @@ def create_app(
         record = _apply_destroy_command(service, plan, _cli_initiator(username))
         _echo_destroyed(record)
 
+    @app.command("sweep")
+    def sweep_command(yes: bool = _YES, max_destroy: int = _MAX_DESTROY) -> None:
+        """Tear down expired tenants."""
+        if max_destroy < 1:
+            typer.echo("max must be at least 1", err=True)
+            raise typer.Exit(2)
+        registry = _open_state(registry_factory)
+        try:
+            report = _run_sweep(
+                registry,
+                sweep_clock,
+                service_factory,
+                yes=yes,
+                max_destroy=max_destroy,
+            )
+        finally:
+            _close_opened(registry)
+        _print_sweep(report)
+        if any(entry.outcome is SweepOutcome.FAILED for entry in report.entries):
+            raise typer.Exit(1)
+
     return app
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _run_sweep(
+    registry: Registry,
+    clock: Clock,
+    service_factory: Callable[[], PlatformService] | None,
+    *,
+    yes: bool,
+    max_destroy: int,
+) -> SweepReport:
+    try:
+        preview = Sweeper(registry, clock).sweep(dry_run=True, max_destroy=max_destroy)
+    except ValueError as exc:
+        _reject_naive_clock(exc)
+    if not yes or not _sweep_has_work(preview):
+        return preview
+    service = _open_service(service_factory)
+    try:
+        return Sweeper(registry, clock, service).sweep(
+            dry_run=False,
+            max_destroy=max_destroy,
+        )
+    except ValueError as exc:
+        _reject_naive_clock(exc)
+    except RegistryUnavailableError as exc:
+        _reject_unwritable_state(exc)
+
+
+def _sweep_has_work(report: SweepReport) -> bool:
+    return any(entry.detail == "dry run" for entry in report.entries)
+
+
+def _reject_naive_clock(exc: ValueError) -> NoReturn:
+    if str(exc) != "clock must return timezone-aware UTC":
+        raise exc
+    typer.echo("clock must return timezone-aware UTC", err=True)
+    raise typer.Exit(1) from None
+
+
+def _print_sweep(report: SweepReport) -> None:
+    if not report.entries:
+        typer.echo("nothing to sweep")
+        return
+    destroyed = 0
+    failed = 0
+    skipped = 0
+    for entry in report.entries:
+        tenant_id = _escape_stored(entry.tenant_id)
+        if entry.outcome is SweepOutcome.DESTROYED:
+            typer.echo(f"destroyed: {tenant_id}")
+            destroyed += 1
+        elif entry.outcome is SweepOutcome.FAILED:
+            typer.echo(f"failed: {tenant_id} {_escape_stored(entry.detail)}")
+            failed += 1
+        else:
+            typer.echo(f"skipped: {tenant_id} {_escape_stored(entry.detail)}")
+            skipped += 1
+    typer.echo(f"summary: {destroyed} destroyed, {failed} failed, {skipped} skipped")
 
 
 def _open_state(factory: Callable[[], Registry] | None) -> Registry:
@@ -485,7 +571,9 @@ def _stored_status(factory: Callable[[], Registry] | None, tenant_id: str) -> st
     return record.status.value
 
 
-def _plan_update(service: PlatformService, tenant_id: str, manifest: Manifest) -> UpdatePlan:
+def _plan_update(
+    service: PlatformService, tenant_id: str, manifest: Manifest
+) -> UpdatePlan:
     try:
         return service.plan_update(tenant_id, manifest)
     except TenantNotFoundError:
@@ -521,8 +609,7 @@ def _print_update_diff(diff: ManifestDiff) -> None:
         name = _escape_stored(removed_entry.name)
         component_type = _escape_stored(removed_entry.component_type)
         typer.echo(
-            f"removed: {name} {component_type} "
-            "(data in this component will be deleted)"
+            f"removed: {name} {component_type} (data in this component will be deleted)"
         )
     for changed_entry in diff.changed:
         options = ", ".join(
@@ -860,6 +947,7 @@ def _print_estimate(estimate: EstimatedCost) -> None:
 _TENANT_TYPE = typer.Option(..., "--type")
 _OWNER = typer.Option(...)
 _YES = typer.Option(False, "--yes")
+_MAX_DESTROY = typer.Option(10, "--max")
 _CONFIRM_REMOVALS = typer.Option(False, "--confirm-removals")
 _CONFIRM_REPLACEMENT = typer.Option(None, "--confirm-replacement")
 _PLAN_ONLY = typer.Option(False, "--plan-only")
