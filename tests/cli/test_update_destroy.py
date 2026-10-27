@@ -64,8 +64,7 @@ _UNSAFE_ID = "cannot confirm this tenant id interactively; pass --yes\n"
 _DATA_LOSS = "(data in this component will be deleted)"
 _STATEMENT = "all resources and data of the tenant will be deleted"
 _CHANGED = (
-    "tenant changed while the command was running; "
-    "no change was made by this command\n"
+    "tenant changed while the command was running; no change was made by this command\n"
 )
 _WITH_REPORTS = """\
 - type: s3-bucket
@@ -314,7 +313,9 @@ def _forbid_executor(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         "list_tagged_resources",
         forbid("list_tagged_resources"),
     )
-    monkeypatch.setattr(LocalExecutor, "tenant_role_exists", forbid("tenant_role_exists"))
+    monkeypatch.setattr(
+        LocalExecutor, "tenant_role_exists", forbid("tenant_role_exists")
+    )
 
 
 def _replacement_catalog() -> Catalog:
@@ -852,7 +853,9 @@ def test_update_yes_alone_is_refused_when_there_are_replacements(
     result = runner.invoke(stack.cli, _update(changed, "--yes"), input="y\n")
 
     assert result.exit_code == 1
-    assert result.stderr == "confirmation required; pass --confirm-replacement uploads\n"
+    assert (
+        result.stderr == "confirmation required; pass --confirm-replacement uploads\n"
+    )
     assert "Traceback" not in result.stderr
     assert "updated:" not in result.stdout
     _assert_same(ssp_home, before, resources)
@@ -982,7 +985,9 @@ def test_update_unknown_replacement_name_does_not_confirm_the_real_one(
     )
 
     assert result.exit_code == 1
-    assert result.stderr == "confirmation required; pass --confirm-replacement uploads\n"
+    assert (
+        result.stderr == "confirmation required; pass --confirm-replacement uploads\n"
+    )
     assert "nope" not in result.stderr
     assert "Traceback" not in result.stderr
     _assert_same(ssp_home, before, resources)
@@ -1172,7 +1177,9 @@ def test_update_stale_plan_exits_without_writes(
 ) -> None:
     stack = _Stack(ssp_home, build_catalog())
     _create_on(stack, _VALID)
-    removal = load_manifest_from_file(_manifest(tmp_path, "removed.yaml", _UPLOADS_ONLY))
+    removal = load_manifest_from_file(
+        _manifest(tmp_path, "removed.yaml", _UPLOADS_ONLY)
+    )
     original = stack.service.plan_update
 
     def change() -> None:
@@ -1207,7 +1214,9 @@ def test_update_changed_during_the_prompt_exits_without_writes(
 ) -> None:
     stack = _Stack(ssp_home, build_catalog())
     _create_on(stack, _VALID)
-    removal = load_manifest_from_file(_manifest(tmp_path, "removed.yaml", _UPLOADS_ONLY))
+    removal = load_manifest_from_file(
+        _manifest(tmp_path, "removed.yaml", _UPLOADS_ONLY)
+    )
     seen: dict[str, TenantRecord] = {}
     counts: dict[str, int] = {}
 
@@ -1298,8 +1307,10 @@ def test_update_output_escapes_stored_strings(
     name = "up\nloads\x1b"
     owner = "caf\u00e9"
     created = _awkward(tmp_path)
-    extra = '- type: sqs-queue\n  name: reports\n'
-    proposed = _manifest(tmp_path, "proposed.yaml", created.read_text(encoding="utf-8") + extra)
+    extra = "- type: sqs-queue\n  name: reports\n"
+    proposed = _manifest(
+        tmp_path, "proposed.yaml", created.read_text(encoding="utf-8") + extra
+    )
     before = _create_real(ssp_home, created, owner=owner)
     loaded = load_manifest_from_file(created)
     assert loaded.root[0].name == name
@@ -1584,7 +1595,9 @@ def test_destroy_leftover_resource_ends_destroy_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _create_real(ssp_home)
-    _arm_init(monkeypatch, lambda executor: executor.leave_one_resource_on_next_destroy())
+    _arm_init(
+        monkeypatch, lambda executor: executor.leave_one_resource_on_next_destroy()
+    )
 
     result = runner.invoke(app, _destroy("demo", "--yes"))
     status = runner.invoke(app, ["status", "demo"])
@@ -1654,7 +1667,10 @@ def test_destroy_yes_works_for_an_unsafe_tenant_id(ssp_home: Path) -> None:
     assert result.stderr == ""
     assert result.stdout.isascii()
     assert "\x1b" not in result.stdout
-    assert f"destroyed: {_escape_stored(tenant_id)} status destroyed" in result.stdout.splitlines()
+    assert (
+        f"destroyed: {_escape_stored(tenant_id)} status destroyed"
+        in result.stdout.splitlines()
+    )
     assert _DESTROY_PROMPT not in result.stdout
     assert status.exit_code == 0
     assert status.stdout.splitlines()[0] == "status: destroyed"
@@ -1742,7 +1758,10 @@ def test_subprocess_lifecycle_leaves_no_resources_and_keeps_the_destroyed_tenant
     assert afterwards.returncode == 0
     assert afterwards.stdout.splitlines()[0] == "status: destroyed"
     assert listed.returncode == 0
-    assert any(line.startswith("demo destroyed dev alice ") for line in listed.stdout.splitlines())
+    assert any(
+        line.startswith("demo destroyed dev alice ")
+        for line in listed.stdout.splitlines()
+    )
     assert tagged == (0,)
     assert roles == (0,)
     assert [record.tenant_id for record in records] == ["demo"]
