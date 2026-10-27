@@ -28,6 +28,7 @@ class TenantType(StrEnum):
 class InitiatorKind(StrEnum):
     CLI = "cli"
     AGENT = "agent"
+    SWEEPER = "sweeper"
 
 
 class DuplicateTenantError(Exception):

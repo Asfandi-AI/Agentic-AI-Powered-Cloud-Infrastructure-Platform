@@ -247,6 +247,56 @@ uploads s3-bucket
 reports sqs-queue
 ```
 
+## Sweeper
+
+`ssp sweep` tears down expired dev and ephemeral tenants through the same path as `ssp destroy`. It runs against the local simulation. It is not AWS. Scheduling is left to you: cron, or Task Scheduler.
+
+Without `--yes` the command is a dry run and changes nothing. `--yes` destroys the expired tenants. `--max N` limits how many successful destroys one run performs. The default is 10.
+
+The transcript below was captured with `$env:USERNAME = "demo"`, and with `USER` and `LOGNAME` set to `demo` when those variables were set. `SSP_HOME` was a temporary directory outside this project, and that directory was deleted afterwards. The tenant was created as ephemeral, then its `expires_at` was set to `2000-01-01T00:00:00+00:00` so the capture did not wait for the TTL.
+
+```text
+uv run ssp sweep
+```
+
+```text
+skipped: demo dry run
+summary: 0 destroyed, 0 failed, 1 skipped
+```
+
+```text
+uv run ssp sweep --yes
+```
+
+```text
+destroyed: demo
+summary: 1 destroyed, 0 failed, 0 skipped
+```
+
+```text
+uv run ssp status demo
+```
+
+```text
+status: destroyed
+tenant_type: ephemeral
+owner: alice
+initiator: sweeper sweeper
+catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+expires_at: 2000-01-01T00:00:00+00:00
+last_error: -
+uploads s3-bucket
+jobs sqs-queue
+```
+
+```text
+uv run ssp sweep
+```
+
+```text
+nothing to sweep
+```
+
 ## Status
 
 Built and usable from the CLI:
@@ -260,15 +310,15 @@ Built and usable from the CLI:
 - create
 - update
 - destroy
+- sweep
 
-`tenants` and `status` read `tenants.sqlite`. `create`, `update`, and `destroy` write that file and `local-executor.sqlite`. `SSP_HOME` must be an absolute path and selects the directory that holds those files. When `SSP_HOME` is unset, the directory is `~/.ssp`.
+`tenants` and `status` read `tenants.sqlite`. `create`, `update`, and `destroy` write that file and `local-executor.sqlite`. `sweep --yes` writes them when it destroys a tenant. A dry run does not. `SSP_HOME` must be an absolute path and selects the directory that holds those files. When `SSP_HOME` is unset, the directory is `~/.ssp`.
 
-`LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes. `create`, `update`, and `destroy` use that simulation. They do not call AWS.
+`LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes. `create`, `update`, `destroy`, and `sweep --yes` use that simulation. They do not call AWS.
 
 Not built yet:
 
 - A Terraform executor or an AWS executor
-- A sweeper
 - An agent
 - An MCP server
 

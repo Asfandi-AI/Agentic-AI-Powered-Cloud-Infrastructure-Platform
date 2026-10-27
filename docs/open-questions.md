@@ -26,7 +26,21 @@ The plan's `component_names` are those at plan time. A destroy removes everythin
 
 ## Sweeper and destroyed tenants
 
-A future Sweeper must skip `destroyed` tenants. Their `expires_at` stays stored for history.
+The Sweeper skips `destroyed` tenants. Their `expires_at` stays stored for history.
+
+## Decision (ours, not in the spec): Sweeper
+
+The Sweeper passes `confirmed=True` because the TTL was shown and accepted at create time. `ssp sweep` defaults to a dry run. `--yes` performs the destroys. `--max` limits successful destroys per run. A failed or skipped tenant does not consume one of those slots. The default is 10. This limit is our decision, not in the spec.
+
+Exit 0 when no entry failed. That includes a dry run that lists eligible tenants and a real sweep whose entries are all skipped. Exit 1 when at least one entry failed, and when the clock is not timezone-aware UTC. Exit 2 when `--max` is below 1, when the state cannot be read, or when the state cannot be written during a destroy.
+
+An expired tenant stuck in `creating`, `updating`, or `destroying` is only reported. The Sweeper does not call the service for it.
+
+One unexpected exception stops the run. The next run continues, because selection is by state.
+
+A tenant that stays `destroy_failed` is retried on every sweep and makes every run exit 1. With the limit, the oldest failing tenants are retried first. There is no backoff and no retry limit.
+
+Dev tenants still expire after 1 day and ephemeral tenants still expire after 3 hours. Those durations remain the POC defaults in the create TTL decision. Prod tenants do not expire, and the Sweeper never selects them.
 
 ## Initiator history
 
@@ -114,7 +128,7 @@ The create command's first write creates the state directory. It is user-only (`
 
 ## Local executor test hooks
 
-`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. `ssp update` and `ssp destroy` use that simulation. They do not call AWS.
+`fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. `ssp update`, `ssp destroy`, and `ssp sweep` use that simulation. They do not call AWS.
 
 Real cloud tools can fail halfway and leave partial resources, so `fail_next_provision` commits the resources it wrote and then raises, and the service must show them. LocalExecutor's own writes are atomic, so `fail_next_provision_atomically` raises inside the provision transaction and rolls it back, and an interrupted LocalExecutor never corrupts its state.
 
