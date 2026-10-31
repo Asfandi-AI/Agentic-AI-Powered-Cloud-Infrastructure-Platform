@@ -328,9 +328,10 @@ Not built yet:
 uv run ruff check .
 uv run mypy src
 uv run pytest
+uv audit --locked
 ```
 
-CI runs the same three.
+CI runs the same three. CI audits the locked dependencies weekly.
 
 ## Open questions
 
