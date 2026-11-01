@@ -1,12 +1,17 @@
 [project]
 name = "self-service-platform"
 version = "0.1.0"
-description = "Add your description here"
+description = "Self-service infrastructure platform (local simulation): validate a YAML manifest, estimate cost, create, update and destroy tenants."
 readme = "README.md"
-authors = [
-    { name = "Asfandyar Fakher", email = "340658162+Asfandi-AI@users.noreply.github.com" }
-]
 requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
 dependencies = [
     "pydantic>=2.14.0",
     "pyyaml>=6.0.3",

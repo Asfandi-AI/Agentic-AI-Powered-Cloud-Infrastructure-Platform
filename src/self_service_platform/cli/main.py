@@ -1,4 +1,5 @@
 import getpass
+import importlib.metadata
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -51,6 +52,15 @@ from self_service_platform.core.validator import (
     validate_manifest,
 )
 
+_DISTRIBUTION_NAME = "self-service-platform"
+
+
+def _print_version(value: bool) -> None:
+    if not value:
+        return
+    typer.echo(importlib.metadata.version(_DISTRIBUTION_NAME))
+    raise typer.Exit()
+
 
 def create_app(
     catalog: Catalog,
@@ -63,6 +73,18 @@ def create_app(
         rich_markup_mode=None,
         pretty_exceptions_enable=False,
     )
+
+    @app.callback()
+    def _root(
+        version: bool = typer.Option(
+            False,
+            "--version",
+            callback=_print_version,
+            is_eager=True,
+        ),
+    ) -> None:
+        return
+
     registry_factory = open_registry
     service_factory = open_service
     sweep_clock = _utc_now if clock is None else clock

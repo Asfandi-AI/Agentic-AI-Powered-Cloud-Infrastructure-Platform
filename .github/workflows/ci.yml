@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - name: Check out the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,7 +48,7 @@ jobs:
         run: uv run pytest
 
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out the code
@@ -64,3 +64,76 @@ jobs:
       - name: Audit locked dependencies
         # This command contacts an external vulnerability service and sends the names and versions of the locked packages.
         run: uv audit --locked
+
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+
+      - name: Build the package
+        run: uv build
+
+      - name: Check the wheel contents
+        run: |
+          python3 - << 'PY'
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              print(f"expected one wheel, found {len(wheels)}", file=sys.stderr)
+              sys.exit(1)
+          wheel = wheels[0]
+          package_prefix = "self_service_platform/"
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+          if not any(
+              name.startswith(package_prefix) and not name.endswith("/") for name in names
+          ):
+              print("self_service_platform package is missing from the wheel", file=sys.stderr)
+              sys.exit(1)
+          forbidden: list[str] = []
+          for name in names:
+              if name.startswith(package_prefix):
+                  continue
+              top, separator, _rest = name.partition("/")
+              own_dist_info = (
+                  separator == "/"
+                  and top.endswith(".dist-info")
+                  and wheel.name.startswith(top.removesuffix(".dist-info") + "-")
+              )
+              if own_dist_info:
+                  continue
+              forbidden.append(name)
+          if forbidden:
+              print("wheel contains a file outside the package:", file=sys.stderr)
+              for name in forbidden:
+                  print(name, file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Install the wheel and run ssp
+        run: |
+          work="$(mktemp -d)"
+          cd "$work"
+          uv venv "$work/venv"
+          wheels=("$GITHUB_WORKSPACE"/dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "expected one wheel" >&2
+            exit 1
+          fi
+          uv pip install --exclude-newer P7D --python "$work/venv/bin/python" "${wheels[0]}"
+          ssp_home="$(mktemp -d)"
+          export SSP_HOME="$ssp_home"
+          "$work/venv/bin/ssp" --version
+          "$work/venv/bin/ssp" catalog
