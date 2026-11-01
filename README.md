@@ -329,9 +329,11 @@ uv run ruff check .
 uv run mypy src
 uv run pytest
 uv audit --locked
+uv build
+ssp --version
 ```
 
-CI runs the same three. CI audits the locked dependencies weekly.
+CI runs ruff, mypy and pytest on Ubuntu and Windows, audits the locked dependencies, and builds and smoke-tests the package. `uv build` writes a wheel and a source distribution in `dist/` and does not publish them. `ssp --version` prints the installed package version and exits.
 
 ## Open questions
 
