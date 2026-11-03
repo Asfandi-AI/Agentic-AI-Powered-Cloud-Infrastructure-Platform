@@ -23,6 +23,8 @@ from self_service_platform.core.tenant import (
     truncate_error,
 )
 
+_BUSY_TIMEOUT_SECONDS = 5.0
+
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id TEXT PRIMARY KEY,
@@ -123,7 +125,7 @@ class SqliteRegistry:
         if read_only:
             self._connection = _open_read_only_connection(path)
             return
-        self._connection = sqlite3.connect(path, timeout=5.0)
+        self._connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_SECONDS)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute(_CREATE_TABLE)
         self._connection.commit()
@@ -227,7 +229,11 @@ def _read_only_uri(path: Path) -> str:
 
 def _open_read_only_connection(path: Path) -> sqlite3.Connection:
     try:
-        connection = sqlite3.connect(_read_only_uri(path), uri=True, timeout=5.0)
+        connection = sqlite3.connect(
+            _read_only_uri(path),
+            uri=True,
+            timeout=_BUSY_TIMEOUT_SECONDS,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
     except (sqlite3.Error, OSError) as exc:

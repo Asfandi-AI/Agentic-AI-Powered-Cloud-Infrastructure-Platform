@@ -340,6 +340,34 @@ def test_concurrent_provisions_leave_one_complete_manifest(tmp_path: Path) -> No
     assert row == ("ok",)
 
 
+def test_first_provision_succeeds_when_the_directory_appears_before_mkdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "state"
+    database = _database(directory)
+    real_mkdir = Path.mkdir
+
+    def mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if self == directory and not self.exists():
+            real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+        real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    request = _request(_manifest(("sqs-queue", "jobs")))
+
+    _open(database).provision(request)
+
+    seen = _open(database).list_tagged_resources(request.tenant_id)
+    assert [resource.tags["component"] for resource in seen] == ["jobs"]
+    assert directory.is_dir()
+
+
 def test_executor_path_with_space_hash_and_percent_works(tmp_path: Path) -> None:
     directory = tmp_path / "state # %"
     directory.mkdir()

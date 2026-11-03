@@ -12,6 +12,7 @@ from self_service_platform.core.executor import (
 )
 from self_service_platform.core.tags import build_tags
 from self_service_platform.core.validator import ValidatedEntry
+from self_service_platform.statedir import create_state_directory
 
 _S3 = AwsService.S3.value
 _BUSY_TIMEOUT_SECONDS = 5.0
@@ -424,11 +425,7 @@ def _is_absent(path: Path) -> bool:
 
 
 def _ensure_directory(directory: Path) -> None:
-    if directory.exists():
-        return
-    directory.mkdir(parents=True, mode=0o700)
-    if os.name == "posix":
-        directory.chmod(0o700)
+    create_state_directory(directory)
 
 
 def _read_only_uri(path: Path) -> str:
