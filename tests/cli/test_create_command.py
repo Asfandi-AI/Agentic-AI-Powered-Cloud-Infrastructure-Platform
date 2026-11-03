@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,7 @@ _INVALID_ISSUES = (
 _PROMPT = "Create this tenant? [y/N]"
 _PLAN_ONLY = "plan only: nothing was written"
 _USER_UNKNOWN = "cannot determine the operating system user\n"
+_STRESS_ROUNDS = 10
 _SECOND_PROCESS = """\
 import sys
 from self_service_platform.app import app
@@ -872,3 +874,79 @@ def test_end_of_file_counts_as_declined(
     assert "created:" not in ended.stdout
     assert "created:" not in declined.stdout
     assert not ssp_home.exists()
+
+
+def test_create_succeeds_when_mkdir_finds_the_directory_already_created(
+    ssp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_mkdir = Path.mkdir
+
+    def mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if self == ssp_home and not self.exists():
+            real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+        real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+
+    result = runner.invoke(app, _command(_VALID, "--yes"))
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert "Traceback" not in result.stderr
+    assert _tenant(ssp_home, "demo").status is TenantStatus.ACTIVE
+
+
+def test_held_write_lock_exits_cannot_write_state(
+    ssp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "self_service_platform.registry.sqlite._BUSY_TIMEOUT_SECONDS",
+        0.2,
+    )
+    ssp_home.mkdir()
+    database = ssp_home / "tenants.sqlite"
+    holder = sqlite3.connect(database, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        result = runner.invoke(app, _command(_VALID, "--yes"))
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5
+    assert result.exit_code == 2
+    assert result.stderr == f"cannot write state: {database}\n"
+    assert "Traceback" not in result.stderr
+
+
+def _fresh_directory_rounds() -> int:
+    configured = os.environ.get("SSP_STRESS_ROUNDS")
+    if configured is None:
+        return _STRESS_ROUNDS
+    return max(_STRESS_ROUNDS, int(configured))
+
+
+def test_concurrent_creates_of_different_ids_on_fresh_directories(
+    tmp_path: Path,
+) -> None:
+    for index in range(_fresh_directory_rounds()):
+        home = tmp_path / f"home-{index}"
+        first = _start_create(home, "demo", _VALID, tmp_path)
+        second = _start_create(home, "other", _VALID, tmp_path)
+        _, err_first = first.communicate(timeout=60)
+        _, err_second = second.communicate(timeout=60)
+        assert first.returncode == 0, f"round {index} demo: {err_first}"
+        assert second.returncode == 0, f"round {index} other: {err_second}"
+        assert _tenant(home, "demo").status is TenantStatus.ACTIVE
+        assert _tenant(home, "other").status is TenantStatus.ACTIVE
+        _integrity_ok(home / "tenants.sqlite")
+        _integrity_ok(home / "local-executor.sqlite")

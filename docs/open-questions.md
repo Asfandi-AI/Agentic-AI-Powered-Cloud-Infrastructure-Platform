@@ -126,6 +126,8 @@ Whether a tenant whose `expires_at` has already passed may still be updated is n
 
 The create command's first write creates the state directory. It is user-only (`0o700`) on POSIX systems. On Windows the default under the user profile is assumed private.
 
+Two first creates could both pass the existence check while the state directory was still missing, and the process that lost `mkdir` exited 2 with `cannot write state` even when the tenant ids differed. `create_state_directory` treats an existing directory as success and applies mode `0o700` only on the call that created it.
+
 ## Local executor test hooks
 
 `fail_next_provision`, `leave_one_resource_on_next_destroy`, `put_bucket_object`, and `delete_component_resource` live on `LocalExecutor`, as they do on the in-memory fake. `fail_next_provision_atomically` is on `LocalExecutor` only. `wiring` and the CLI do not call them. `LocalExecutor` is a persistent local simulation, not AWS. `ssp update`, `ssp destroy`, and `ssp sweep` use that simulation. They do not call AWS.

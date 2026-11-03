@@ -1,4 +1,5 @@
 import ast
+import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -228,6 +229,96 @@ def _sweeper_import_violations(path: Path) -> list[str]:
 
 def test_sweeper_does_not_import_executors_registry_or_sqlite() -> None:
     assert _sweeper_import_violations(_PACKAGE / "core" / "sweeper.py") == []
+
+
+def _adapter_composition_violations(paths: list[Path] | None = None) -> list[str]:
+    if paths is None:
+        chosen = [
+            *_python_files(_PACKAGE / "registry"),
+            *_python_files(_PACKAGE / "executors"),
+        ]
+    else:
+        chosen = paths
+    found: list[str] = []
+    for path in chosen:
+        relative = path.relative_to(_ROOT).as_posix()
+        for statement in _import_statements(path):
+            names = _imported_names(statement)
+            if any(_is_named_module(name, _COMPOSITION_MODULES) for name in names):
+                found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_registry_and_executors_do_not_import_wiring_or_app() -> None:
+    assert _adapter_composition_violations() == []
+
+
+def test_executor_import_of_wiring_or_app_is_rejected() -> None:
+    probe = _PACKAGE / "executors" / "_architecture_wiring.py"
+    probe.write_text(
+        "import self_service_platform.wiring\nimport self_service_platform.app\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _adapter_composition_violations([probe])
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/executors/_architecture_wiring.py: "
+            "import self_service_platform.wiring"
+        ),
+        (
+            "src/self_service_platform/executors/_architecture_wiring.py: "
+            "import self_service_platform.app"
+        ),
+    ]
+
+
+def _statedir_name_allowed(name: str) -> bool:
+    if name == "self_service_platform.core" or name.startswith(
+        "self_service_platform.core."
+    ):
+        return True
+    return name.split(".", 1)[0] in sys.stdlib_module_names
+
+
+def _statedir_import_violations(path: Path) -> list[str]:
+    relative = path.relative_to(_ROOT).as_posix()
+    found: list[str] = []
+    for statement in _import_statements(path):
+        names = _imported_names(statement)
+        if any(not _statedir_name_allowed(name) for name in names):
+            found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_statedir_imports_only_the_standard_library_and_core() -> None:
+    assert _statedir_import_violations(_PACKAGE / "statedir.py") == []
+
+
+def test_statedir_import_outside_stdlib_and_core_is_rejected() -> None:
+    probe = _PACKAGE / "_architecture_statedir.py"
+    probe.write_text(
+        "import self_service_platform.wiring\nimport self_service_platform.registry\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _statedir_import_violations(probe)
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/_architecture_statedir.py: "
+            "import self_service_platform.wiring"
+        ),
+        (
+            "src/self_service_platform/_architecture_statedir.py: "
+            "import self_service_platform.registry"
+        ),
+    ]
 
 
 def test_sweeper_import_of_executors_registry_or_sqlite_is_rejected() -> None:

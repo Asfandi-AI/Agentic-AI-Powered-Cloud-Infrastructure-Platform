@@ -18,6 +18,7 @@ from self_service_platform.core.tenant import (
 )
 from self_service_platform.executors.local import LocalExecutor
 from self_service_platform.registry.sqlite import SqliteRegistry
+from self_service_platform.statedir import create_state_directory
 
 _DATABASE_NAME = "tenants.sqlite"
 _EXECUTOR_DATABASE_NAME = "local-executor.sqlite"
@@ -145,18 +146,10 @@ class _WritableRegistry:
 def _prepare_database(path: Path) -> None:
     if path.exists() and not path.is_file():
         raise RegistryUnavailableError(path)
-    directory = path.parent
-    if directory.exists():
-        return
     try:
-        directory.mkdir(parents=True, mode=0o700)
-    except OSError as exc:
+        create_state_directory(path.parent)
+    except RegistryUnavailableError as exc:
         raise RegistryUnavailableError(path) from exc
-    if os.name == "posix":
-        try:
-            directory.chmod(0o700)
-        except OSError as exc:
-            raise RegistryUnavailableError(path) from exc
 
 
 class _MissingState:
