@@ -1,8 +1,10 @@
 from collections.abc import Callable
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
+from typer.testing import CliRunner
 
 from self_service_platform.catalog.catalog import (
     Catalog,
@@ -16,6 +18,10 @@ from self_service_platform.catalog.component import (
     Component,
     DeletionBehaviour,
 )
+from self_service_platform.cli.main import app
+from self_service_platform.core.cost import estimate_cost
+from self_service_platform.core.manifest import load_manifest_from_string
+from self_service_platform.core.validator import validate_manifest
 
 _REQUIRED_TAG_KEYS = frozenset(
     {"tenant_id", "tenant_type", "owner", "managed_by", "component"}
@@ -64,12 +70,17 @@ def _with_different_options_schema(component: Component) -> Component:
     return component.model_copy(update={"options_model": _OptionsWithVersioning})
 
 
-def test_build_catalog_contains_the_two_starter_components() -> None:
+def test_build_catalog_contains_the_starter_components() -> None:
     component_types = {
         component.component_type for component in build_catalog().list_components()
     }
 
-    assert component_types == {"s3-bucket", "sqs-queue"}
+    assert component_types == {
+        "lambda-function",
+        "log-group",
+        "s3-bucket",
+        "sqs-queue",
+    }
 
 
 @pytest.mark.parametrize(
@@ -184,3 +195,74 @@ def test_catalog_version_changes_when_replacement_forcing_options_change() -> No
 def test_starter_components_have_no_replacement_forcing_options() -> None:
     for component in build_catalog().list_components():
         assert component.replacement_forcing_options == frozenset()
+
+
+def test_catalog_version_changes_when_lambda_function_and_log_group_are_added() -> None:
+    catalog = build_catalog()
+    bucket = catalog.get("s3-bucket")
+    queue = catalog.get("sqs-queue")
+    base = _version_of(bucket, queue)
+    with_function = _version_of(bucket, queue, catalog.get("lambda-function"))
+    with_both = _version_of(
+        bucket,
+        queue,
+        catalog.get("lambda-function"),
+        catalog.get("log-group"),
+    )
+
+    assert with_function != base
+    assert with_both != with_function
+
+
+@pytest.mark.parametrize("component_type", ["lambda-function", "log-group"])
+def test_lambda_function_and_log_group_options_reject_unknown_fields(
+    component_type: str,
+) -> None:
+    options_model = build_catalog().get(component_type).options_model
+
+    with pytest.raises(ValidationError):
+        options_model.model_validate({"foo": 1})
+
+
+_LAMBDA_AND_LOG_GROUP = """\
+- type: s3-bucket
+  name: uploads
+- type: lambda-function
+  name: worker
+- type: log-group
+  name: app
+"""
+
+_runner = CliRunner()
+
+
+def test_manifest_with_lambda_function_and_log_group_validates_and_is_not_priced(
+    tmp_path: Path,
+) -> None:
+    validated = validate_manifest(
+        load_manifest_from_string(_LAMBDA_AND_LOG_GROUP),
+        build_catalog(),
+    )
+    estimate = estimate_cost(validated)
+
+    assert [component.component_type for component in estimate.components] == [
+        "s3-bucket",
+        "lambda-function",
+        "log-group",
+    ]
+    assert estimate.total is None
+    for component in estimate.components:
+        assert component.total is None
+        for item in component.line_items:
+            assert item.amount is None
+    path = tmp_path / "manifest.yaml"
+    path.write_text(_LAMBDA_AND_LOG_GROUP, encoding="utf-8")
+    result = _runner.invoke(app, ["estimate", str(path)])
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    lines = result.stdout.splitlines()
+    for header in ("uploads s3-bucket", "worker lambda-function", "app log-group"):
+        section = lines[lines.index(header) + 1 : lines.index(header) + 3]
+        assert any("not priced" in line for line in section)
+    assert "manifest total: not priced" in result.stdout

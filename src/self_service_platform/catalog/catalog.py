@@ -30,6 +30,14 @@ class SqsQueueOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class LambdaFunctionOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LogGroupOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class Catalog:
     def __init__(self) -> None:
         self._components: dict[str, Component] = {}
@@ -64,6 +72,8 @@ def build_catalog() -> Catalog:
     catalog = Catalog()
     catalog.register(_s3_bucket())
     catalog.register(_sqs_queue())
+    catalog.register(_lambda_function())
+    catalog.register(_log_group())
     return catalog
 
 
@@ -90,6 +100,32 @@ def _sqs_queue() -> Component:
         required_tags=REQUIRED_TAG_KEYS,
         deletion_behaviour=DeletionBehaviour.DELETE,
         permissions=("sqs:CreateQueue", "sqs:DeleteQueue"),
+    )
+
+
+def _lambda_function() -> Component:
+    return Component(
+        component_type="lambda-function",
+        description="A Lambda function",
+        aws_service=AwsService.LAMBDA,
+        options_model=cast(type[BaseModel], LambdaFunctionOptions),
+        cost_line_items=(CostLineItem(description="Lambda requests", amount=None),),
+        required_tags=REQUIRED_TAG_KEYS,
+        deletion_behaviour=DeletionBehaviour.DELETE,
+        permissions=("lambda:CreateFunction", "lambda:DeleteFunction"),
+    )
+
+
+def _log_group() -> Component:
+    return Component(
+        component_type="log-group",
+        description="A log group",
+        aws_service=AwsService.LOGS,
+        options_model=cast(type[BaseModel], LogGroupOptions),
+        cost_line_items=(CostLineItem(description="Log storage", amount=None),),
+        required_tags=REQUIRED_TAG_KEYS,
+        deletion_behaviour=DeletionBehaviour.DELETE,
+        permissions=("logs:CreateLogGroup", "logs:DeleteLogGroup"),
     )
 
 

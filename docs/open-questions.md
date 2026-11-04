@@ -74,6 +74,10 @@ The CLI `diff` command only reports, so it does not ask for the confirmations in
 
 This create path requires a Manifest, so the Default_Manifest in Requirement 3.2 is not applied.
 
+## Lambda function and log group
+
+`lambda-function` and `log-group` have empty options and unpriced line items. Names and options for the default function and log group are still undecided.
+
 ## AWS resource names
 
 The Tenant_Id format and the AWS naming limits are unknown, so Requirement 2.3 is not enforced for a name that would violate those limits. `ssp create` rejects only an empty or whitespace-only id, and any id that contains a control character. It does not define a Tenant_Id format.
