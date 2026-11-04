@@ -121,6 +121,39 @@ jobs sqs-queue
 ```
 
 ```text
+uv run ssp create demo --type dev --owner alice --yes
+```
+
+```text
+tenant_id: demo
+tenant_type: dev
+owner: alice
+bucket s3-bucket
+  S3 storage not priced
+  total: not priced
+function lambda-function
+  Lambda requests not priced
+  total: not priced
+logs log-group
+  Log storage not priced
+  total: not priced
+manifest total: not priced
+POC heuristic
+expires_at: 2026-11-05T10:42:50.787545+00:00
+created: demo status active
+status: active
+tenant_type: dev
+owner: alice
+initiator: cli demo
+catalog_version: f09c038f8d5f67596e1ce70903ec402743ff79ec8d1d23a1905e2ad64ba1f8f5
+expires_at: 2026-11-05T10:42:50.787545+00:00
+last_error: -
+bucket s3-bucket
+function lambda-function
+logs log-group
+```
+
+```text
 uv run ssp update demo examples/added-manifest.yaml --yes
 ```
 

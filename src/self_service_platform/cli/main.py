@@ -15,6 +15,7 @@ from self_service_platform.core.diff import ManifestDiff, compute_diff
 from self_service_platform.core.manifest import (
     Manifest,
     ManifestLoadError,
+    default_manifest,
     load_manifest_from_file,
 )
 from self_service_platform.core.registry import Clock, Registry
@@ -132,6 +133,7 @@ def create_app(
         _print_diff(compute_diff(applied=old_manifest, proposed=new_manifest))
 
     @app.command("tenants")
+    @app.command("list")
     def tenants_command() -> None:
         """List every tenant."""
         registry = _open_state(registry_factory)
@@ -154,7 +156,7 @@ def create_app(
     @app.command("create")
     def create_command(
         tenant_id: str,
-        manifest_path: Path,
+        manifest_path: Path | None = _MANIFEST_PATH,
         tenant_type: TenantType = _TENANT_TYPE,
         owner: str = _OWNER,
         yes: bool = _YES,
@@ -164,7 +166,10 @@ def create_app(
         _reject_tenant_id(tenant_id)
         _reject_owner(owner)
         username = _operating_system_user()
-        manifest = _load_manifest(manifest_path)
+        if manifest_path is None:
+            manifest = default_manifest()
+        else:
+            manifest = _load_manifest(manifest_path)
         _require_valid_manifest(manifest, catalog)
         service = _open_service(service_factory)
         plan = _plan_create(service, tenant_id, tenant_type, owner, manifest)
@@ -966,6 +971,7 @@ def _print_estimate(estimate: EstimatedCost) -> None:
     typer.echo(estimate.label)
 
 
+_MANIFEST_PATH = typer.Argument(None)
 _TENANT_TYPE = typer.Option(..., "--type")
 _OWNER = typer.Option(...)
 _YES = typer.Option(False, "--yes")

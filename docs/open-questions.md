@@ -70,13 +70,13 @@ The currency or unit of amounts is not specified.
 
 The CLI `diff` command only reports, so it does not ask for the confirmations in Requirements 4.3 and 4.9. `ssp update` asks for them. `--yes` is only the update confirmation. Removals and replacements need their own flags, or their own prompts when stdin is a terminal.
 
-## Manifest required on create
+## Default manifest on create
 
-This create path requires a Manifest, so the Default_Manifest in Requirement 3.2 is not applied.
+`ssp create` applies the Default_Manifest when no manifest path is given. It is three entries, `bucket` (`s3-bucket`), `function` (`lambda-function`) and `logs` (`log-group`), each with empty options. Those names are a POC choice.
 
 ## Lambda function and log group
 
-`lambda-function` and `log-group` have empty options and unpriced line items. Names and options for the default function and log group are still undecided.
+`lambda-function` and `log-group` have empty options and unpriced line items. In the Default_Manifest their names are `function` and `logs`, which is a POC choice.
 
 ## AWS resource names
 

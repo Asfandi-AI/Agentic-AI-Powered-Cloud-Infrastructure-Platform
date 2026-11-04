@@ -950,3 +950,95 @@ def test_concurrent_creates_of_different_ids_on_fresh_directories(
         assert _tenant(home, "other").status is TenantStatus.ACTIVE
         _integrity_ok(home / "tenants.sqlite")
         _integrity_ok(home / "local-executor.sqlite")
+
+
+_DEFAULT_CREATE = ["create", "demo", "--type", "dev", "--owner", "alice"]
+_DATA_LOSS = "(data in this component will be deleted)"
+
+
+def test_create_without_a_manifest_plans_the_three_default_entries(
+    ssp_home: Path,
+) -> None:
+    result = runner.invoke(app, [*_DEFAULT_CREATE, "--plan-only"])
+
+    assert result.exit_code == 0, result.stderr.strip()
+    lines = result.stdout.splitlines()
+    for header in ("bucket s3-bucket", "function lambda-function", "logs log-group"):
+        section = lines[lines.index(header) + 1 : lines.index(header) + 3]
+        assert any("not priced" in line for line in section)
+    assert lines[-1] == _PLAN_ONLY
+    assert not ssp_home.exists()
+
+
+def test_create_without_a_manifest_requires_confirmation(
+    ssp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _terminal(monkeypatch, False)
+
+    result = runner.invoke(app, _DEFAULT_CREATE, input="y\n")
+
+    assert result.exit_code == 1, result.stderr.strip()
+    assert result.stderr == "confirmation required; pass --yes\n"
+    assert not ssp_home.exists()
+
+
+def test_create_without_a_manifest_stores_the_default_manifest(ssp_home: Path) -> None:
+    result = runner.invoke(app, [*_DEFAULT_CREATE, "--yes"])
+
+    assert result.exit_code == 0, result.stderr.strip()
+    record = _tenant(ssp_home, "demo")
+    stored = [(entry.name, entry.type, entry.options) for entry in record.manifest]
+    assert stored == [
+        ("bucket", "s3-bucket", {}),
+        ("function", "lambda-function", {}),
+        ("logs", "log-group", {}),
+    ]
+    assert record.status is TenantStatus.ACTIVE
+
+
+def test_status_prints_the_stored_default_entries(ssp_home: Path) -> None:
+    created = runner.invoke(app, [*_DEFAULT_CREATE, "--yes"])
+
+    assert created.exit_code == 0, created.stderr.strip()
+    status = runner.invoke(app, ["status", "demo"])
+
+    assert status.exit_code == 0
+    assert status.stderr == ""
+    lines = status.stdout.splitlines()
+    assert "bucket s3-bucket" in lines
+    assert "function lambda-function" in lines
+    assert "logs log-group" in lines
+
+
+def test_update_of_a_default_tenant_uses_the_stored_entries(
+    tmp_path: Path,
+    ssp_home: Path,
+) -> None:
+    created = runner.invoke(app, [*_DEFAULT_CREATE, "--yes"])
+    assert created.exit_code == 0, created.stderr.strip()
+    manifest = tmp_path / "bucket.yaml"
+    manifest.write_text("- type: s3-bucket\n  name: bucket\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["update", "demo", str(manifest), "--plan-only"])
+
+    assert result.exit_code == 0, result.stderr.strip()
+    assert (
+        f"removed: function lambda-function {_DATA_LOSS}" in result.stdout.splitlines()
+    )
+    assert f"removed: logs log-group {_DATA_LOSS}" in result.stdout.splitlines()
+    assert "removed: bucket s3-bucket" not in result.stdout
+
+
+def test_list_prints_the_same_lines_as_tenants(ssp_home: Path) -> None:
+    command = _command(_VALID, "--yes")
+    created = runner.invoke(app, command)
+    assert created.exit_code == 0, created.stderr.strip()
+
+    listed = runner.invoke(app, ["list"])
+    tenants = runner.invoke(app, ["tenants"])
+
+    assert listed.exit_code == 0, listed.stderr.strip()
+    assert command[1] in listed.stdout
+    assert listed.stdout == tenants.stdout
+    assert listed.stderr == ""
