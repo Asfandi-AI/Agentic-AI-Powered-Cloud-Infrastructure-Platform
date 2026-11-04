@@ -74,6 +74,8 @@ The CLI `diff` command only reports, so it does not ask for the confirmations in
 
 `ssp create` applies the Default_Manifest when no manifest path is given. It is three entries, `bucket` (`s3-bucket`), `function` (`lambda-function`) and `logs` (`log-group`), each with empty options. Those names are a POC choice.
 
+Requirement 3.1 names an optional `--manifest` option. `ssp create` keeps the manifest as an optional positional argument so that `create TENANT_ID MANIFEST` keeps working. This is a POC choice. The spec also names a `list` command; `ssp list` is an alias of `ssp tenants`.
+
 ## Lambda function and log group
 
 `lambda-function` and `log-group` have empty options and unpriced line items. In the Default_Manifest their names are `function` and `logs`, which is a POC choice.
