@@ -25,9 +25,11 @@ uv run ssp catalog
 ```
 
 ```text
+lambda-function lambda A Lambda function
+log-group logs A log group
 s3-bucket s3 An S3 bucket
 sqs-queue sqs An SQS queue
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: f09c038f8d5f67596e1ce70903ec402743ff79ec8d1d23a1905e2ad64ba1f8f5
 ```
 
 The catalog_version value is a hash that changes whenever a component definition changes.
