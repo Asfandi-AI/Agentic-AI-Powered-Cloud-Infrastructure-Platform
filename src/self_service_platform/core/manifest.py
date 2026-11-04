@@ -32,6 +32,16 @@ class Manifest(
         return self
 
 
+def default_manifest() -> Manifest:
+    return Manifest.model_validate(
+        [
+            {"type": "s3-bucket", "name": "bucket", "options": {}},
+            {"type": "lambda-function", "name": "function", "options": {}},
+            {"type": "log-group", "name": "logs", "options": {}},
+        ]
+    )
+
+
 def load_manifest_from_file(path: Path) -> Manifest:
     return load_manifest_from_string(path.read_text(encoding="utf-8-sig"))
 
