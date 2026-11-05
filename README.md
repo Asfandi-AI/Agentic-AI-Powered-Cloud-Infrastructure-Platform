@@ -25,11 +25,15 @@ uv run ssp catalog
 ```
 
 ```text
+dynamodb-table dynamodb A DynamoDB table
+eventbridge-rule events An EventBridge rule
+http-api apigateway An HTTP API
 lambda-function lambda A Lambda function
 log-group logs A log group
 s3-bucket s3 An S3 bucket
+sns-topic sns An SNS topic
 sqs-queue sqs An SQS queue
-catalog_version: f09c038f8d5f67596e1ce70903ec402743ff79ec8d1d23a1905e2ad64ba1f8f5
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 ```
 
 The catalog_version value is a hash that changes whenever a component definition changes.

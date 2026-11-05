@@ -241,3 +241,48 @@ def test_lambda_function_and_log_group_are_created_updated_and_destroyed(
     executor.destroy(tenant_id)
     assert executor.list_tagged_resources(tenant_id) == ()
     assert executor.tenant_role_exists(tenant_id) is False
+
+
+@pytest.mark.parametrize("factory", EXECUTOR_FACTORIES)
+def test_allowlist_components_are_created_updated_and_destroyed(
+    factory: Callable[[], Executor],
+) -> None:
+    executor = factory()
+    tenant_id = "tenant-a"
+    executor.provision(
+        _request(
+            _manifest(
+                ("dynamodb-table", "records"),
+                ("sns-topic", "notices"),
+                ("eventbridge-rule", "schedule"),
+                ("http-api", "gateway"),
+            )
+        )
+    )
+    created = executor.list_tagged_resources(tenant_id)
+    assert {resource.tags["component"] for resource in created} == {
+        "gateway",
+        "notices",
+        "records",
+        "schedule",
+    }
+
+    executor.provision(
+        _request(
+            _manifest(
+                ("dynamodb-table", "records"),
+                ("sns-topic", "notices"),
+                ("eventbridge-rule", "schedule"),
+            )
+        )
+    )
+    updated = executor.list_tagged_resources(tenant_id)
+    assert {resource.tags["component"] for resource in updated} == {
+        "notices",
+        "records",
+        "schedule",
+    }
+
+    executor.destroy(tenant_id)
+    assert executor.list_tagged_resources(tenant_id) == ()
+    assert executor.tenant_role_exists(tenant_id) is False

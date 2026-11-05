@@ -80,6 +80,8 @@ Requirement 3.1 names an optional `--manifest` option. `ssp create` keeps the ma
 
 `lambda-function` and `log-group` have empty options and unpriced line items. In the Default_Manifest their names are `function` and `logs`, which is a POC choice.
 
+`dynamodb-table`, `sns-topic`, `eventbridge-rule` and `http-api` have empty options and unpriced line items. The permission names for events (PutRule, DeleteRule) and apigateway (POST, DELETE) do not follow the Create/Delete pattern. `apigateway:POST` and `apigateway:DELETE` are coarse actions that apply to any POST or DELETE under the API Gateway resource, not only to API creation. Permissions are catalog metadata only until requirement R7 (Permissions_Boundary) is built.
+
 ## AWS resource names
 
 The Tenant_Id format and the AWS naming limits are unknown, so Requirement 2.3 is not enforced for a name that would violate those limits. `ssp create` rejects only an empty or whitespace-only id, and any id that contains a control character. It does not define a Tenant_Id format.
