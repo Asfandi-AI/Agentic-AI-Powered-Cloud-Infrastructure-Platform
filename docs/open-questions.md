@@ -158,6 +158,20 @@ Interactive destroy accepts only the exact tenant id, case-sensitive, without st
 
 If another process wins the registry's conditional write, `apply_update` and `apply_destroy` raise `TransitionRejectedError`. The CLI prints `tenant changed while the command was running; no change was made by this command` and exits 1. It does not catch any other exception from the executor.
 
+## Execution policy and permissions boundary
+
+The `kms:Decrypt` Deny uses `StringNotEquals` on `kms:ViaService`. The IAM condition operators page (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html) describes `StringNotEquals` as negated matching. It says that if the key in a policy condition is not present in the request context, the values do not match and the condition is false, and that if the policy condition requires that the key is not matched, such as `StringNotLike` or `ArnNotLike`, and the key is not present, the condition is true. That logic applies to all condition operators except `...IfExists` and the Null check. `StringNotEquals` is negated matching, so under that rule a missing `kms:ViaService` makes this condition true.
+
+Requirement 7.7 is not implemented. The IAM service-authorization reference (https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam.html) lists these condition keys for `PassRole`: `aws:ResourceTag/${TagKey}`, `iam:AssociatedResourceArn`, `iam:PassedToService`, and `iam:ResourceTag/${TagKey}`. `iam:PermissionsBoundary` is not among them. The Execution_Policy has no `iam:PassRole` statement, so the blanket Deny covers `iam:PassRole`. A real deploy that needs to pass a role would not work. The code does not include a replacement mechanism.
+
+Requirement 7.9 is not met. It asks for tests against a synthesized identity stack. This repo has no synthesized identity stack. The tests check the JSON documents against these rules. They do not call IAM, and they do not show that AWS accepts the documents.
+
+The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm:GetParameters`), and `Resource: "*"` for those actions are a proposal for this POC. They are not from the spec.
+
+`iam:CreateRole` and `iam:TagRole` share one Allow that requires `iam:PermissionsBoundary`. The Actions table does not list that key for `TagRole`. Whether tag-on-create works under that condition is unverified.
+
+`permissions_boundary` and `execution_policy` are not called by the CLI or any executor, so nothing enforces these documents.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).
