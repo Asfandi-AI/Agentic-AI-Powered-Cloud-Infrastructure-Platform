@@ -76,9 +76,13 @@ def test_build_catalog_contains_the_starter_components() -> None:
     }
 
     assert component_types == {
+        "dynamodb-table",
+        "eventbridge-rule",
+        "http-api",
         "lambda-function",
         "log-group",
         "s3-bucket",
+        "sns-topic",
         "sqs-queue",
     }
 
@@ -263,6 +267,106 @@ def test_manifest_with_lambda_function_and_log_group_validates_and_is_not_priced
     assert result.stderr == ""
     lines = result.stdout.splitlines()
     for header in ("uploads s3-bucket", "worker lambda-function", "app log-group"):
+        section = lines[lines.index(header) + 1 : lines.index(header) + 3]
+        assert any("not priced" in line for line in section)
+    assert "manifest total: not priced" in result.stdout
+
+
+def test_catalog_version_changes_when_the_allowlist_components_are_added() -> None:
+    catalog = build_catalog()
+    current = (
+        catalog.get("s3-bucket"),
+        catalog.get("sqs-queue"),
+        catalog.get("lambda-function"),
+        catalog.get("log-group"),
+    )
+    added = (
+        catalog.get("dynamodb-table"),
+        catalog.get("sns-topic"),
+        catalog.get("eventbridge-rule"),
+        catalog.get("http-api"),
+    )
+    version = _version_of(*current)
+    growing = current
+    for component in added:
+        growing = (*growing, component)
+        next_version = _version_of(*growing)
+        assert next_version != version
+        version = next_version
+
+
+@pytest.mark.parametrize(
+    "component_type",
+    ["dynamodb-table", "sns-topic", "eventbridge-rule", "http-api"],
+)
+def test_allowlist_component_options_reject_unknown_fields(component_type: str) -> None:
+    options_model = build_catalog().get(component_type).options_model
+
+    with pytest.raises(ValidationError):
+        options_model.model_validate({"foo": 1})
+
+
+_ALL_EIGHT = """\
+- type: s3-bucket
+  name: uploads
+- type: sqs-queue
+  name: jobs
+- type: lambda-function
+  name: worker
+- type: log-group
+  name: app
+- type: dynamodb-table
+  name: records
+- type: sns-topic
+  name: notices
+- type: eventbridge-rule
+  name: schedule
+- type: http-api
+  name: gateway
+"""
+
+
+def test_manifest_with_all_eight_components_validates_and_is_not_priced(
+    tmp_path: Path,
+) -> None:
+    validated = validate_manifest(
+        load_manifest_from_string(_ALL_EIGHT),
+        build_catalog(),
+    )
+    estimate = estimate_cost(validated)
+
+    assert [component.component_type for component in estimate.components] == [
+        "s3-bucket",
+        "sqs-queue",
+        "lambda-function",
+        "log-group",
+        "dynamodb-table",
+        "sns-topic",
+        "eventbridge-rule",
+        "http-api",
+    ]
+    assert estimate.total is None
+    for component in estimate.components:
+        assert component.total is None
+        for item in component.line_items:
+            assert item.amount is None
+    path = tmp_path / "manifest.yaml"
+    path.write_text(_ALL_EIGHT, encoding="utf-8")
+    result = _runner.invoke(app, ["estimate", str(path)])
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    lines = result.stdout.splitlines()
+    for header in (
+        "uploads s3-bucket",
+        "jobs sqs-queue",
+        "worker lambda-function",
+        "app log-group",
+        "records dynamodb-table",
+        "notices sns-topic",
+        "schedule eventbridge-rule",
+        "gateway http-api",
+    ):
         section = lines[lines.index(header) + 1 : lines.index(header) + 3]
         assert any("not priced" in line for line in section)
     assert "manifest total: not priced" in result.stdout

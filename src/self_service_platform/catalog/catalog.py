@@ -38,6 +38,22 @@ class LogGroupOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class DynamoDbTableOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SnsTopicOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EventBridgeRuleOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class HttpApiOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class Catalog:
     def __init__(self) -> None:
         self._components: dict[str, Component] = {}
@@ -74,6 +90,10 @@ def build_catalog() -> Catalog:
     catalog.register(_sqs_queue())
     catalog.register(_lambda_function())
     catalog.register(_log_group())
+    catalog.register(_dynamodb_table())
+    catalog.register(_sns_topic())
+    catalog.register(_eventbridge_rule())
+    catalog.register(_http_api())
     return catalog
 
 
@@ -126,6 +146,58 @@ def _log_group() -> Component:
         required_tags=REQUIRED_TAG_KEYS,
         deletion_behaviour=DeletionBehaviour.DELETE,
         permissions=("logs:CreateLogGroup", "logs:DeleteLogGroup"),
+    )
+
+
+def _dynamodb_table() -> Component:
+    return Component(
+        component_type="dynamodb-table",
+        description="A DynamoDB table",
+        aws_service=AwsService.DYNAMODB,
+        options_model=cast(type[BaseModel], DynamoDbTableOptions),
+        cost_line_items=(CostLineItem(description="DynamoDB storage", amount=None),),
+        required_tags=REQUIRED_TAG_KEYS,
+        deletion_behaviour=DeletionBehaviour.DELETE,
+        permissions=("dynamodb:CreateTable", "dynamodb:DeleteTable"),
+    )
+
+
+def _sns_topic() -> Component:
+    return Component(
+        component_type="sns-topic",
+        description="An SNS topic",
+        aws_service=AwsService.SNS,
+        options_model=cast(type[BaseModel], SnsTopicOptions),
+        cost_line_items=(CostLineItem(description="SNS requests", amount=None),),
+        required_tags=REQUIRED_TAG_KEYS,
+        deletion_behaviour=DeletionBehaviour.DELETE,
+        permissions=("sns:CreateTopic", "sns:DeleteTopic"),
+    )
+
+
+def _eventbridge_rule() -> Component:
+    return Component(
+        component_type="eventbridge-rule",
+        description="An EventBridge rule",
+        aws_service=AwsService.EVENTBRIDGE,
+        options_model=cast(type[BaseModel], EventBridgeRuleOptions),
+        cost_line_items=(CostLineItem(description="EventBridge events", amount=None),),
+        required_tags=REQUIRED_TAG_KEYS,
+        deletion_behaviour=DeletionBehaviour.DELETE,
+        permissions=("events:PutRule", "events:DeleteRule"),
+    )
+
+
+def _http_api() -> Component:
+    return Component(
+        component_type="http-api",
+        description="An HTTP API",
+        aws_service=AwsService.HTTP_API,
+        options_model=cast(type[BaseModel], HttpApiOptions),
+        cost_line_items=(CostLineItem(description="HTTP API requests", amount=None),),
+        required_tags=REQUIRED_TAG_KEYS,
+        deletion_behaviour=DeletionBehaviour.DELETE,
+        permissions=("apigateway:POST", "apigateway:DELETE"),
     )
 
 
