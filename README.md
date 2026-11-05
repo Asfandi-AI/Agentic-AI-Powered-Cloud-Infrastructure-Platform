@@ -355,6 +355,8 @@ Built and usable from the CLI:
 
 `LocalExecutor` is a persistent local simulation stored in `local-executor.sqlite` under the state directory. It is not AWS. The in-memory fake forgets everything between processes. `create`, `update`, `destroy`, and `sweep --yes` use that simulation. They do not call AWS.
 
+The Execution_Policy and the Permissions_Boundary exist as policy documents built by `execution_policy` and `permissions_boundary` in `core/policy.py`. Structural tests check those documents. They are not verified against IAM, and nothing applies them.
+
 Not built yet:
 
 - A Terraform executor or an AWS executor
