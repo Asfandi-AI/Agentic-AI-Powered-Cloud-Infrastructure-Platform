@@ -172,6 +172,10 @@ The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm
 
 `permissions_boundary` and `execution_policy` are not called by the CLI or any executor, so nothing enforces these documents.
 
+## Confirmation tokens
+
+The issuer and the verifier exist in `core/` and nothing calls them yet, so requirement 11.3 is not enforced for `apply_create`, `apply_update` and `apply_destroy`. The store is in memory and process-local. The 15-minute lifetime is a POC value, not from the spec. The digest does not include the Initiator. An Audit_Log entry must never contain the token string (requirement 13.3).
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).

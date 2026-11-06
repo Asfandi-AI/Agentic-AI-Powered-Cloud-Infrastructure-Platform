@@ -345,3 +345,43 @@ def test_sweeper_import_of_executors_registry_or_sqlite_is_rejected() -> None:
             "import self_service_platform.registry"
         ),
     ]
+
+
+_ISSUER_MODULE = "self_service_platform.core.confirmation_issuer"
+
+
+def _confirmation_issuer_violations(path: Path) -> list[str]:
+    relative = path.relative_to(_ROOT).as_posix()
+    found: list[str] = []
+    for statement in _import_statements(path):
+        names = _imported_names(statement)
+        if any(
+            name == _ISSUER_MODULE or name.startswith(f"{_ISSUER_MODULE}.")
+            for name in names
+        ):
+            found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_confirmation_does_not_import_the_issuer() -> None:
+    path = _PACKAGE / "core" / "confirmation.py"
+    assert _confirmation_issuer_violations(path) == []
+
+
+def test_confirmation_import_of_the_issuer_is_rejected() -> None:
+    probe = _PACKAGE / "core" / "_architecture_confirmation.py"
+    probe.write_text(
+        "import self_service_platform.core.confirmation_issuer\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _confirmation_issuer_violations(probe)
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/core/_architecture_confirmation.py: "
+            "import self_service_platform.core.confirmation_issuer"
+        )
+    ]
