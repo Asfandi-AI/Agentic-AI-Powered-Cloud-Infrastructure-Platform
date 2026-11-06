@@ -361,7 +361,7 @@ Not built yet:
 
 - A Terraform executor or an AWS executor
 - An agent
-- Confirmation tokens
+- Confirmation tokens: the issuer and the verifier exist in `core/` and are not used yet
 - A `chat` command
 - An MCP server
 - An audit log
