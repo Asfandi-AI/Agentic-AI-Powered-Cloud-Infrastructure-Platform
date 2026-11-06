@@ -340,13 +340,13 @@ nothing to sweep
 
 Built and usable from the CLI:
 
-- catalog
+- catalog, which lists `s3-bucket`, `sqs-queue`, `lambda-function`, `log-group`, `dynamodb-table`, `sns-topic`, `eventbridge-rule`, and `http-api`
 - validate
 - estimate
 - Manifest diff
-- tenants
+- tenants, with `list` as an alias
 - status
-- create
+- create, which calls `default_manifest()` when no manifest path is given (`bucket` of type `s3-bucket`, `function` of type `lambda-function`, `logs` of type `log-group`)
 - update
 - destroy
 - sweep
@@ -361,7 +361,10 @@ Not built yet:
 
 - A Terraform executor or an AWS executor
 - An agent
+- Confirmation tokens
+- A `chat` command
 - An MCP server
+- An audit log
 
 ## Development
 
