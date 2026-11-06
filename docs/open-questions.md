@@ -48,7 +48,7 @@ Requirement 13.4 says the Registry records the Initiator for each create, update
 
 ## Record without a stored Manifest
 
-Requirement 8.1 says an existing Registry record with no stored Manifest is treated as the Default Manifest. That case is not handled yet.
+Requirement 8.1 says an existing Registry record with no stored Manifest is treated as the Default Manifest. `TenantRecord.manifest` is required. The tenants table defines `manifest_json` as `TEXT NOT NULL`. `apply_create` stores the plan's entries on the creating record and again when the tenant becomes active. This code does not write a tenant without a manifest. No code treats a missing manifest as the Default_Manifest, because this code does not produce such a record.
 
 ## YAML anchors and aliases
 
