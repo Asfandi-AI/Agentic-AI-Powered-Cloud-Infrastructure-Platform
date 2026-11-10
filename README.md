@@ -361,8 +361,8 @@ Not built yet:
 
 - A Terraform executor or an AWS executor
 - An agent: twelve tools in `agent/` call `PlatformService`. The Model_Client interface and the fake exist in `core/`, and there is no Bedrock client
-- Confirmation tokens: `create`, `update`, `destroy`, and `sweep` use the issuer and the verifier in `core/`. An agent does not
-- A `chat` command
+- Confirmation tokens: `create`, `update`, `destroy`, `sweep`, and `chat` use the issuer and the verifier in `core/`
+- A Bedrock client for `chat`. The command exists, confirmation stays in the CLI, and `ssp chat` reports that no model client is configured
 - An MCP server
 - An audit log: the JSON-lines sink is used by those commands, and there is no real CloudWatch sink
 

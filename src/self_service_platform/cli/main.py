@@ -11,6 +11,7 @@ import typer
 
 from self_service_platform.catalog.catalog import Catalog, build_catalog
 from self_service_platform.core.audit import AuditLogError
+from self_service_platform.core.chat_host import ChatHost
 from self_service_platform.core.cost import EstimatedCost, estimate_cost
 from self_service_platform.core.diff import ManifestDiff, compute_diff
 from self_service_platform.core.manifest import (
@@ -19,6 +20,7 @@ from self_service_platform.core.manifest import (
     default_manifest,
     load_manifest_from_file,
 )
+from self_service_platform.core.model_client import ModelClientError
 from self_service_platform.core.registry import Clock, Registry
 from self_service_platform.core.service import (
     ConfirmationRequiredError,
@@ -69,6 +71,7 @@ def create_app(
     open_registry: Callable[[], Registry] | None = None,
     open_service: Callable[[], PlatformService] | None = None,
     clock: Clock | None = None,
+    chat_runner: Callable[[PlatformService, ChatHost, Initiator], None] | None = None,
 ) -> typer.Typer:
     app = typer.Typer(
         add_completion=False,
@@ -277,6 +280,23 @@ def create_app(
         _print_sweep(report)
         if any(entry.outcome is SweepOutcome.FAILED for entry in report.entries):
             raise typer.Exit(1)
+
+    @app.command("chat")
+    def chat_command() -> None:
+        """Talk to the platform through the configured model client."""
+        if chat_runner is None:
+            typer.echo("no model client is configured", err=True)
+            raise typer.Exit(2)
+        username = _operating_system_user()
+        initiator = Initiator(kind=InitiatorKind.AGENT, owner=username)
+        service = _open_service(service_factory)
+        try:
+            chat_runner(service, _CliChatHost(service), initiator)
+        except AuditLogError:
+            _reject_audit()
+        except ModelClientError as exc:
+            typer.echo(_escape_stored(str(exc)), err=True)
+            raise typer.Exit(1) from None
 
     return app
 
@@ -875,6 +895,83 @@ def _destroy_confirmed(tenant_id: str, yes: bool, on_no: Callable[[], None]) -> 
 
 def _printable_ascii(value: str) -> bool:
     return all(32 <= ord(character) <= 126 for character in value)
+
+
+class _CliChatHost:
+    """Confirms chat plans with the same prompts as the other commands."""
+
+    def __init__(self, service: PlatformService) -> None:
+        self._service = service
+
+    def read_message(self) -> str | None:
+        try:
+            return input()
+        except EOFError:
+            return None
+
+    def publish(self, text: str) -> None:
+        typer.echo(text)
+
+    def confirm_create(self, plan: CreatePlan) -> bool:
+        _print_create_plan(plan)
+        return _create_confirmed(False)
+
+    def confirm_update(self, plan: UpdatePlan) -> UpdateConfirmations | None:
+        try:
+            status = self._service.current_status(plan.tenant_id).value
+        except TenantNotFoundError:
+            status = "missing"
+        _print_update_plan(plan, status)
+        return _chat_update_confirmations(plan)
+
+    def confirm_destroy(self, plan: DestroyPlan) -> bool:
+        _print_destroy_plan(plan)
+        return _chat_destroy_confirmed(plan.tenant_id)
+
+
+def _chat_update_confirmations(plan: UpdatePlan) -> UpdateConfirmations | None:
+    if plan.nothing_to_change:
+        return None
+    if not _stdin_is_terminal():
+        typer.echo("confirmation required; pass --yes", err=True)
+        return None
+    typer.echo("Apply this update? [y/N]")
+    if not _answer_is_yes():
+        return None
+    if plan.removals:
+        shown = _names_or_dash(plan.removals)
+        typer.echo(f"Delete the data of these components: {shown}? [y/N]")
+        if not _answer_is_yes():
+            return None
+    confirmed: set[str] = set()
+    for name in plan.replacements:
+        typer.echo(f"Recreate {_escape_stored(name)} (its data is lost)? [y/N]")
+        if not _answer_is_yes():
+            return None
+        confirmed.add(name)
+    return UpdateConfirmations(
+        update=True,
+        removals=bool(plan.removals),
+        replacements=frozenset(confirmed),
+    )
+
+
+def _chat_destroy_confirmed(tenant_id: str) -> bool:
+    if not _printable_ascii(tenant_id):
+        typer.echo(
+            "cannot confirm this tenant id interactively; pass --yes",
+            err=True,
+        )
+        return False
+    if not _stdin_is_terminal():
+        typer.echo("confirmation required; pass --yes", err=True)
+        return False
+    typer.echo("Type the tenant id to confirm destroy:")
+    try:
+        answer = input()
+    except EOFError:
+        return False
+    return answer == tenant_id
 
 
 def _apply_destroy_command(

@@ -174,7 +174,7 @@ The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm
 
 ## Confirmation tokens
 
-`create`, `update`, `destroy`, and `sweep` obtain a single-use token and pass it to `apply_create`, `apply_update`, and `apply_destroy`. A call that omits the token still uses the boolean confirmation. The store is in memory and process-local. The 15-minute lifetime is a POC value, not from the spec. The digest does not include the Initiator. An Audit_Log entry must never contain the token string (requirement 13.3). An agent does not use these tokens.
+`create`, `update`, `destroy`, and `sweep` obtain a single-use token and pass it to `apply_create`, `apply_update`, and `apply_destroy`. A call that omits the token still uses the boolean confirmation. The store is in memory and process-local. The 15-minute lifetime is a POC value, not from the spec. The digest does not include the Initiator. An Audit_Log entry must never contain the token string (requirement 13.3). `chat` uses the same issuer through the CLI. The model does not issue a token.
 
 ## Audit log
 
@@ -190,7 +190,7 @@ The allow-list stops secret argument keys, but an identity field that a caller f
 
 ## Model client
 
-The Model_Client protocol and `FakeModelClient` exist in `core/`. Twelve tools in `agent/` call `PlatformService`. The host confirms a plan and passes the token to `execute_create`, `execute_update`, or `execute_destroy`. `execute_destroy` is recorded as `destroy`. The tools do not call the model yet. There is no Bedrock client. The Bedrock model id is still unverified, so requirement 9.2 is not started.
+The Model_Client protocol and `FakeModelClient` exist in `core/`. Twelve tools in `agent/` call `PlatformService`. The host confirms a plan and passes the token to `execute_create`, `execute_update`, or `execute_destroy`. `execute_destroy` is recorded as `destroy`. `chat` calls this protocol through `run_chat`. There is no Bedrock client, and an MCP server is still absent. The Bedrock model id is still unverified, so requirement 9.2 is not started.
 
 ## Decided
 
