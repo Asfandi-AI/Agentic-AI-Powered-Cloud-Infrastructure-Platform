@@ -188,6 +188,10 @@ Every write calls `fsync`, which costs speed. On Windows the file has no user-on
 
 The allow-list stops secret argument keys, but an identity field that a caller fills with a secret would be stored. The audit file contains the operating system user name. Requirement 9.4 and decision 8 are not expressed in `core/policy.py`.
 
+## Model client
+
+The Model_Client protocol and `FakeModelClient` exist in `core/`. The Agent does not call them yet. There is no Bedrock client. The Bedrock model id is still unverified, so requirement 9.2 is not started.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).
