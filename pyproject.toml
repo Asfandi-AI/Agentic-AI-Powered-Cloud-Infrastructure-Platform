@@ -13,6 +13,7 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
+    "boto3>=1.35",
     "pydantic>=2.14.0",
     "pyyaml>=6.0.3",
     "typer>=0.27.3",
@@ -28,6 +29,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "boto3-stubs[logs]>=1.35",
     "hypothesis>=6.169.0",
     "mypy>=2.4.0",
     "pre-commit>=4.6.2",

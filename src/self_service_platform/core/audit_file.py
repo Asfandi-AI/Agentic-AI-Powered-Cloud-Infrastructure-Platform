@@ -1,10 +1,9 @@
 """Append-only JSON-lines audit file. The constructor does not touch the disk."""
 
-import json
 import os
 from pathlib import Path
 
-from self_service_platform.core.audit import AuditEntry
+from self_service_platform.core.audit import AuditEntry, audit_json
 from self_service_platform.statedir import create_state_directory
 
 _LOG_NAME = "audit.jsonl"
@@ -23,23 +22,7 @@ class JsonLinesAuditLog:
 
 
 def _line(entry: AuditEntry) -> bytes:
-    payload = {
-        "arguments": entry.arguments,
-        "decision": None if entry.decision is None else entry.decision.value,
-        "initiator_kind": entry.initiator_kind.value,
-        "initiator_owner": entry.initiator_owner,
-        "outcome": None if entry.outcome is None else entry.outcome.value,
-        "tenant_id": entry.tenant_id,
-        "time": entry.time.isoformat(),
-        "tool_name": entry.tool_name.value,
-    }
-    text = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-    return f"{text}\n".encode("ascii")
+    return f"{audit_json(entry)}\n".encode("ascii")
 
 
 def _append(path: Path, payload: bytes) -> None:

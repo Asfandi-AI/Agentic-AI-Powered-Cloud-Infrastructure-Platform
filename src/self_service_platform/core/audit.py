@@ -1,5 +1,6 @@
 """Audit entries. Nothing in the CLI or the service calls this module yet."""
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -84,6 +85,26 @@ class AuditEntry(BaseModel):
     arguments: dict[str, Any]
     outcome: Outcome | None
     decision: Decision | None
+
+
+def audit_json(entry: AuditEntry) -> str:
+    """One canonical JSON object. The file sink adds the trailing newline."""
+    payload = {
+        "arguments": entry.arguments,
+        "decision": None if entry.decision is None else entry.decision.value,
+        "initiator_kind": entry.initiator_kind.value,
+        "initiator_owner": entry.initiator_owner,
+        "outcome": None if entry.outcome is None else entry.outcome.value,
+        "tenant_id": entry.tenant_id,
+        "time": entry.time.isoformat(),
+        "tool_name": entry.tool_name.value,
+    }
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
 
 
 class AuditLog(Protocol):

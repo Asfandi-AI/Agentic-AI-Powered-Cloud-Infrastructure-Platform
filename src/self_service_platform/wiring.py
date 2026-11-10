@@ -3,10 +3,18 @@ import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
+import boto3
+
+from self_service_platform.audit.cloudwatch import LogsClient, RealCloudWatchAuditLog
 from self_service_platform.catalog.catalog import build_catalog
-from self_service_platform.core.audit import AuditEntry, Outcome, ToolName
+from self_service_platform.core.audit import (
+    AuditEntry,
+    CompositeAuditLog,
+    Outcome,
+    ToolName,
+)
 from self_service_platform.core.audit_file import JsonLinesAuditLog
 from self_service_platform.core.confirmation_issuer import confirmation_pair
 from self_service_platform.core.registry import Clock, Registry
@@ -25,6 +33,7 @@ from self_service_platform.statedir import create_state_directory
 
 _DATABASE_NAME = "tenants.sqlite"
 _EXECUTOR_DATABASE_NAME = "local-executor.sqlite"
+_LOG_STREAM = "ssp-audit-log"
 # POC defaults. Not from the spec.
 _DEV_TTL = timedelta(days=1)
 _EPHEMERAL_TTL = timedelta(hours=3)
@@ -160,18 +169,40 @@ def _prepare_database(path: Path) -> None:
         raise RegistryUnavailableError(path) from exc
 
 
+def _setting(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    text = value.strip()
+    if text == "":
+        return None
+    return text
+
+
+def _audit_sink(directory: Path) -> JsonLinesAuditLog | CompositeAuditLog:
+    file_sink = JsonLinesAuditLog(directory)
+    region = _setting("SSP_AWS_REGION")
+    group = _setting("SSP_LOG_GROUP")
+    if region is None or group is None:
+        return file_sink
+    client = cast(LogsClient, boto3.client("logs", region_name=region))
+    cloud = RealCloudWatchAuditLog(client, log_group=group, log_stream=_LOG_STREAM)
+    return CompositeAuditLog((file_sink, cloud))
+
+
 class _AuditAfterStateExists:
-    """Writes audit.jsonl when an execute or destroy succeeds.
+    """Writes audit entries when an execute or destroy succeeds.
 
     Entries stay in memory until that success. A plan, a decline, a refusal,
     or a failed attempt does not create SSP_HOME and does not change a state
     directory that already exists. The registry creates the directory before
-    the success entry is recorded.
+    the success entry is recorded. When SSP_AWS_REGION and SSP_LOG_GROUP are
+    set, the same entries also go to CloudWatch Logs.
     """
 
     def __init__(self, directory: Path) -> None:
         self._directory = directory
-        self._sink = JsonLinesAuditLog(directory)
+        self._sink = _audit_sink(directory)
         self._pending: list[AuditEntry] = []
 
     def write(self, entry: AuditEntry) -> None:
