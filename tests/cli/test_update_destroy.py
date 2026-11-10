@@ -4,7 +4,8 @@ import shutil
 import sqlite3
 import subprocess
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -23,6 +24,14 @@ from self_service_platform.catalog.component import (
     DeletionBehaviour,
 )
 from self_service_platform.cli.main import _escape_stored, create_app
+from self_service_platform.core.audit import (
+    AuditEntry,
+    AuditLogError,
+    Decision,
+    Outcome,
+    ToolName,
+)
+from self_service_platform.core.confirmation_issuer import confirmation_pair
 from self_service_platform.core.executor import ProvisionRequest, ResourceRef
 from self_service_platform.core.manifest import (
     Manifest,
@@ -41,12 +50,14 @@ from self_service_platform.core.service import (
 from self_service_platform.core.tenant import (
     Initiator,
     InitiatorKind,
+    TenantNotFoundError,
     TenantRecord,
     TenantStatus,
     TenantType,
     TransitionFields,
     TransitionRejectedError,
 )
+from self_service_platform.executors.fake import FakeExecutor
 from self_service_platform.executors.local import LocalExecutor
 from self_service_platform.registry.sqlite import SqliteRegistry
 
@@ -478,12 +489,17 @@ class _Stack:
         registry = self.registry
         if reject is not None:
             registry = _RejectingRegistry(self.registry, reject)
+        audit, issuer, verifier = _gate(clock)
+        self.audit = audit
         self.service = PlatformService(
             catalog,
             registry,
             self.executor,
             clock,
             TtlPolicy(dev=timedelta(days=1), ephemeral=timedelta(hours=3)),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
         self.cli = create_app(
             catalog,
@@ -1995,3 +2011,245 @@ def test_confirm_replacement_option_parses_on_the_installed_command(
         "jobs",
         "reports",
     )
+
+
+_FIXED_TOKEN = "fixed-confirmation-token-value"
+_CANNOT_AUDIT = "cannot write the audit log\n"
+
+
+class _RecordingAudit:
+    def __init__(self) -> None:
+        self.entries: list[AuditEntry] = []
+        self.fail_decisions = False
+
+    def write(self, entry: AuditEntry) -> None:
+        if self.fail_decisions and entry.decision is not None:
+            raise AuditLogError(1)
+        self.entries.append(entry)
+
+
+def _gate(clock: Callable[[], datetime]) -> tuple[_RecordingAudit, object, object]:
+    issuer, verifier = confirmation_pair(clock)
+    return _RecordingAudit(), issuer, verifier
+
+
+@contextmanager
+def _wired(
+    home: Path,
+    audit: _RecordingAudit | None = None,
+) -> Iterator[tuple[object, _RecordingAudit, SqliteRegistry]]:
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
+    chosen = _RecordingAudit() if audit is None else audit
+    issuer, verifier = confirmation_pair(clock)
+    catalog = build_catalog()
+    home.mkdir(parents=True, exist_ok=True)
+    registry = SqliteRegistry(home / "tenants.sqlite", clock)
+    try:
+        service = PlatformService(
+            catalog,
+            registry,
+            FakeExecutor(),
+            clock,
+            TtlPolicy(dev=timedelta(days=1), ephemeral=timedelta(hours=3)),
+            audit_log=chosen,
+            issuer=issuer,
+            verifier=verifier,
+        )
+        cli = create_app(
+            catalog,
+            open_registry=lambda: registry,
+            open_service=lambda: service,
+        )
+        yield cli, chosen, registry
+    finally:
+        registry.close()
+
+
+def _create_yes(manifest: Path = _VALID) -> list[str]:
+    return [
+        "create",
+        "demo",
+        str(manifest),
+        "--type",
+        "dev",
+        "--owner",
+        "alice",
+        "--yes",
+    ]
+
+
+def _fix_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "self_service_platform.core.confirmation_issuer.secrets.token_urlsafe",
+        lambda _size: _FIXED_TOKEN,
+    )
+
+
+def _rendered(audit: _RecordingAudit, result: Result) -> str:
+    return result.stdout + result.stderr + str(audit.entries)
+
+
+def test_create_yes_records_the_decision_and_the_execute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fix_token(monkeypatch)
+    with _wired(tmp_path / "state") as (cli, audit, _registry):
+        result = runner.invoke(cli, _create_yes())
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    confirmed = [
+        entry
+        for entry in audit.entries
+        if entry.decision is Decision.CONFIRMED
+        and entry.tool_name is ToolName.EXECUTE_CREATE
+    ]
+    succeeded = [
+        entry
+        for entry in audit.entries
+        if entry.outcome is Outcome.SUCCEEDED
+        and entry.tool_name is ToolName.EXECUTE_CREATE
+    ]
+    assert len(confirmed) == 1
+    assert len(succeeded) == 1
+    assert confirmed[0].arguments == {}
+    assert _FIXED_TOKEN not in _rendered(audit, result)
+
+
+def test_create_no_records_declined_and_creates_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "self_service_platform.cli.main._stdin_is_terminal",
+        lambda: True,
+    )
+    with _wired(tmp_path / "state") as (cli, audit, registry):
+        result = runner.invoke(
+            cli,
+            ["create", "demo", str(_VALID), "--type", "dev", "--owner", "alice"],
+            input="n\n",
+        )
+        declined = [
+            entry
+            for entry in audit.entries
+            if entry.decision is Decision.DECLINED
+            and entry.tool_name is ToolName.EXECUTE_CREATE
+        ]
+        assert result.exit_code == 1
+        assert len(declined) == 1
+        assert "created:" not in result.stdout
+        with pytest.raises(TenantNotFoundError):
+            registry.get("demo")
+
+
+def test_destroy_yes_records_the_decision_and_the_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fix_token(monkeypatch)
+    with _wired(tmp_path / "state") as (cli, audit, _registry):
+        created = runner.invoke(cli, _create_yes())
+        result = runner.invoke(cli, ["destroy", "demo", "--yes"])
+
+    assert created.exit_code == 0
+    assert result.exit_code == 0
+    confirmed = [
+        entry
+        for entry in audit.entries
+        if entry.decision is Decision.CONFIRMED and entry.tool_name is ToolName.DESTROY
+    ]
+    succeeded = [
+        entry
+        for entry in audit.entries
+        if entry.outcome is Outcome.SUCCEEDED and entry.tool_name is ToolName.DESTROY
+    ]
+    assert len(confirmed) == 1
+    assert len(succeeded) == 1
+    assert succeeded[0].arguments["data_loss_confirmed"] is True
+    assert _FIXED_TOKEN not in _rendered(audit, result)
+
+
+def test_update_removal_records_data_loss_and_the_removal_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fix_token(monkeypatch)
+    manifest = tmp_path / "uploads-only.yaml"
+    manifest.write_text("- type: s3-bucket\n  name: uploads\n", encoding="utf-8")
+    with _wired(tmp_path / "state") as (cli, audit, _registry):
+        created = runner.invoke(cli, _create_yes())
+        result = runner.invoke(
+            cli,
+            ["update", "demo", str(manifest), "--yes", "--confirm-removals"],
+        )
+
+    assert created.exit_code == 0
+    assert result.exit_code == 0
+    succeeded = [
+        entry
+        for entry in audit.entries
+        if entry.outcome is Outcome.SUCCEEDED
+        and entry.tool_name is ToolName.EXECUTE_UPDATE
+    ]
+    assert len(succeeded) == 1
+    assert succeeded[0].arguments["data_loss_confirmed"] is True
+    assert succeeded[0].arguments["removal_count"] == 1
+    assert _FIXED_TOKEN not in _rendered(audit, result)
+
+
+def test_plan_only_records_the_plan_and_no_decision(tmp_path: Path) -> None:
+    with _wired(tmp_path / "state") as (cli, audit, registry):
+        result = runner.invoke(
+            cli,
+            [
+                "create",
+                "demo",
+                str(_VALID),
+                "--type",
+                "dev",
+                "--owner",
+                "alice",
+                "--plan-only",
+            ],
+        )
+        assert result.exit_code == 0
+        plans = [
+            entry for entry in audit.entries if entry.tool_name is ToolName.PLAN_CREATE
+        ]
+        assert len(plans) == 1
+        assert plans[0].outcome is Outcome.SUCCEEDED
+        assert all(entry.decision is None for entry in audit.entries)
+        with pytest.raises(TenantNotFoundError):
+            registry.get("demo")
+
+
+def test_a_failed_confirm_exits_2_and_creates_nothing(tmp_path: Path) -> None:
+    audit = _RecordingAudit()
+    audit.fail_decisions = True
+    with _wired(tmp_path / "state", audit) as (cli, log, registry):
+        result = runner.invoke(cli, _create_yes())
+        assert result.exit_code == 2
+        assert result.stderr == _CANNOT_AUDIT
+        assert "created:" not in result.stdout
+        assert "Traceback" not in result.stderr
+        assert all(entry.decision is None for entry in log.entries)
+        with pytest.raises(TenantNotFoundError):
+            registry.get("demo")
+
+
+def test_the_token_is_absent_from_stdout_and_the_sink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fix_token(monkeypatch)
+    with _wired(tmp_path / "state") as (cli, audit, _registry):
+        result = runner.invoke(cli, _create_yes())
+
+    assert result.exit_code == 0
+    assert _FIXED_TOKEN not in result.stdout
+    assert _FIXED_TOKEN not in result.stderr
+    assert _FIXED_TOKEN not in str(audit.entries)

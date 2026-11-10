@@ -152,8 +152,9 @@ def _destroy_selected(
 def _destroy_one(service: PlatformService, record: TenantRecord) -> SweepEntry:
     try:
         plan = service.plan_destroy(record.tenant_id)
-        # The TTL was shown and accepted at create time.
-        service.apply_destroy(plan, confirmed=True, initiator=_SWEEPER)
+        # The TTL was shown and accepted at create time. --yes is that confirmation.
+        token = service.confirm_destroy(plan, _SWEEPER)
+        service.apply_destroy(plan, confirmed=True, initiator=_SWEEPER, token=token)
     except (DestroyNotAllowedError, StalePlanError, TransitionRejectedError) as exc:
         return _skipped(record, truncate_error(str(exc)))
     except DestroyFailedError as exc:

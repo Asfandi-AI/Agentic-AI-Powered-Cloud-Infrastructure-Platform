@@ -174,13 +174,15 @@ The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm
 
 ## Confirmation tokens
 
-The issuer and the verifier exist in `core/` and nothing calls them yet, so requirement 11.3 is not enforced for `apply_create`, `apply_update` and `apply_destroy`. The store is in memory and process-local. The 15-minute lifetime is a POC value, not from the spec. The digest does not include the Initiator. An Audit_Log entry must never contain the token string (requirement 13.3).
+`create`, `update`, `destroy`, and `sweep` obtain a single-use token and pass it to `apply_create`, `apply_update`, and `apply_destroy`. A call that omits the token still uses the boolean confirmation. The store is in memory and process-local. The 15-minute lifetime is a POC value, not from the spec. The digest does not include the Initiator. An Audit_Log entry must never contain the token string (requirement 13.3). An agent does not use these tokens.
 
 ## Audit log
 
-The JSON-lines sink and a fake CloudWatch sink exist in `core/` and nothing calls them yet, so requirements 13.1 and 13.2 are not met in practice. There is no real CloudWatch sink, so 13.5 is half done.
+`plan_create`, `plan_update`, `execute_create`, `execute_update`, and `destroy` write the audit log. `list_catalog`, `draft_manifest`, `validate_manifest`, `estimate`, `list_tenants`, and `tenant_status` do not. There is still no real CloudWatch sink, so 13.5 is half done. The fake CloudWatch sink is not wired.
 
-When a sink fails the library tries every sink and raises. Whether execute or destroy may proceed when the audit write fails is undecided. The recommendation is that they must not proceed.
+A failed audit write refuses to start execute or destroy. If the outcome write fails after the registry has already changed, the change is left in place and the error is raised. The CLI exits 2 with `cannot write the audit log`.
+
+The JSON-lines file is appended when an execute or destroy succeeds, after the state directory exists. A plan, a decline, a refusal, or a failed attempt stays in the process and does not create or change `SSP_HOME`.
 
 Every write calls `fsync`, which costs speed. On Windows the file has no user-only ACL guarantee and concurrent append atomicity is not verified, and the same holds for network file systems.
 

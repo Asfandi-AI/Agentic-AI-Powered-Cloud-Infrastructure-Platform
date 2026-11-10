@@ -10,6 +10,7 @@ from typing import NoReturn
 import typer
 
 from self_service_platform.catalog.catalog import Catalog, build_catalog
+from self_service_platform.core.audit import AuditLogError
 from self_service_platform.core.cost import EstimatedCost, estimate_cost
 from self_service_platform.core.diff import ManifestDiff, compute_diff
 from self_service_platform.core.manifest import (
@@ -172,14 +173,17 @@ def create_app(
             manifest = _load_manifest(manifest_path)
         _require_valid_manifest(manifest, catalog)
         service = _open_service(service_factory)
+        initiator = _cli_initiator(username)
         plan = _plan_create(service, tenant_id, tenant_type, owner, manifest)
         _print_create_plan(plan)
         if plan_only:
             typer.echo("plan only: nothing was written")
             return
         if not _create_confirmed(yes):
+            _record_decline(lambda: service.decline_create(plan, initiator))
             raise typer.Exit(1)
-        record = _apply_create(service, plan, _cli_initiator(username))
+        token = _confirmed_token(lambda: service.confirm_create(plan, initiator))
+        record = _apply_create(service, plan, initiator, token)
         _echo_created(record)
 
     @app.command("update")
@@ -196,22 +200,37 @@ def create_app(
         manifest = _load_manifest(manifest_path)
         _require_valid_manifest(manifest, catalog)
         service = _open_service(service_factory)
+        initiator = _cli_initiator(username)
         plan = _plan_update(service, tenant_id, manifest)
-        status = _stored_status(registry_factory, tenant_id)
+        status = _status_of(service, tenant_id)
         _print_update_plan(plan, status)
         if plan.nothing_to_change or plan_only:
             return
+
+        def decline() -> None:
+            _record_decline(lambda: service.decline_update(plan, initiator))
+
         confirmations = _update_confirmations(
             plan,
             yes,
             confirm_removals,
             _replacement_names(confirm_replacement),
+            decline,
+        )
+        token = _confirmed_token(
+            lambda: service.confirm_update(
+                plan,
+                initiator,
+                data_loss_confirmed=confirmations.removals,
+                confirmed_replacements=frozenset(plan.replacements),
+            )
         )
         record = _apply_update_command(
             service,
             plan,
             confirmations,
-            _cli_initiator(username),
+            initiator,
+            token,
         )
         _echo_updated(record)
 
@@ -224,12 +243,18 @@ def create_app(
         """Destroy a tenant."""
         username = _operating_system_user()
         service = _open_service(service_factory)
+        initiator = _cli_initiator(username)
         plan = _plan_destroy(service, tenant_id)
         _print_destroy_plan(plan)
         if plan_only:
             return
-        _destroy_confirmed(plan.tenant_id, yes)
-        record = _apply_destroy_command(service, plan, _cli_initiator(username))
+
+        def decline() -> None:
+            _record_decline(lambda: service.decline_destroy(plan, initiator))
+
+        _destroy_confirmed(plan.tenant_id, yes, decline)
+        token = _confirmed_token(lambda: service.confirm_destroy(plan, initiator))
+        record = _apply_destroy_command(service, plan, initiator, token)
         _echo_destroyed(record)
 
     @app.command("sweep")
@@ -284,6 +309,8 @@ def _run_sweep(
         _reject_naive_clock(exc)
     except RegistryUnavailableError as exc:
         _reject_unwritable_state(exc)
+    except AuditLogError:
+        _reject_audit()
 
 
 def _sweep_has_work(report: SweepReport) -> bool:
@@ -504,6 +531,8 @@ def _plan_create(
         return service.plan_create(tenant_id, tenant_type, owner, manifest)
     except ManifestValidationError as exc:
         _report_create_issues(exc)
+    except AuditLogError:
+        _reject_audit()
 
 
 def _print_create_plan(plan: CreatePlan) -> None:
@@ -532,7 +561,7 @@ def _create_confirmed(yes: bool) -> bool:
         return True
     if not _stdin_is_terminal():
         typer.echo("confirmation required; pass --yes", err=True)
-        raise typer.Exit(1)
+        return False
     typer.echo("Create this tenant? [y/N]")
     try:
         answer = input()
@@ -549,9 +578,10 @@ def _apply_create(
     service: PlatformService,
     plan: CreatePlan,
     initiator: Initiator,
+    token: str,
 ) -> TenantRecord:
     try:
-        return service.apply_create(plan, True, initiator).record
+        return service.apply_create(plan, True, initiator, token=token).record
     except ManifestValidationError as exc:
         _report_create_issues(exc)
     except (ConfirmationRequiredError, StalePlanError, DuplicateTenantError) as exc:
@@ -568,6 +598,8 @@ def _apply_create(
     except RegistryUnavailableError as exc:
         typer.echo(f"cannot write state: {exc.path}", err=True)
         raise typer.Exit(2) from None
+    except AuditLogError:
+        _reject_audit()
 
 
 def _echo_created(record: TenantRecord) -> None:
@@ -589,17 +621,19 @@ def _report_issues(issues: list[ManifestValidationIssue]) -> NoReturn:
     raise typer.Exit(1)
 
 
-def _stored_status(factory: Callable[[], Registry] | None, tenant_id: str) -> str:
-    registry = _open_state(factory)
+def _status_of(service: PlatformService, tenant_id: str) -> str:
     try:
-        record = _load_tenant(registry, tenant_id)
-    finally:
-        _close_opened(registry)
-    return record.status.value
+        return service.current_status(tenant_id).value
+    except TenantNotFoundError:
+        _missing_tenant(tenant_id)
+    except RegistryUnavailableError as exc:
+        _reject_unwritable_state(exc)
 
 
 def _plan_update(
-    service: PlatformService, tenant_id: str, manifest: Manifest
+    service: PlatformService,
+    tenant_id: str,
+    manifest: Manifest,
 ) -> UpdatePlan:
     try:
         return service.plan_update(tenant_id, manifest)
@@ -613,6 +647,8 @@ def _plan_update(
         _report_issues(exc.issues)
     except RegistryUnavailableError as exc:
         _reject_unwritable_state(exc)
+    except AuditLogError:
+        _reject_audit()
 
 
 def _print_update_plan(plan: UpdatePlan, status: str) -> None:
@@ -673,33 +709,34 @@ def _update_confirmations(
     yes: bool,
     confirm_removals: bool,
     replacement_names: tuple[str, ...],
+    on_no: Callable[[], None],
 ) -> UpdateConfirmations:
     confirmed = set(replacement_names)
     if not _stdin_is_terminal():
         missing = _missing_update_flags(plan, yes, confirm_removals, confirmed)
         if len(missing) > 0:
             typer.echo(f"confirmation required; pass {' '.join(missing)}", err=True)
-            raise typer.Exit(1)
+            _stop(on_no)
         return _confirmations(yes, confirm_removals, confirmed)
     update_ok = yes
     if not update_ok:
         typer.echo("Apply this update? [y/N]")
         if not _answer_is_yes():
-            raise typer.Exit(1)
+            _stop(on_no)
         update_ok = True
     removals_ok = confirm_removals
     if plan.removals and not removals_ok:
         shown = _names_or_dash(plan.removals)
         typer.echo(f"Delete the data of these components: {shown}? [y/N]")
         if not _answer_is_yes():
-            raise typer.Exit(1)
+            _stop(on_no)
         removals_ok = True
     for name in plan.replacements:
         if name in confirmed:
             continue
         typer.echo(f"Recreate {_escape_stored(name)} (its data is lost)? [y/N]")
         if not _answer_is_yes():
-            raise typer.Exit(1)
+            _stop(on_no)
         confirmed.add(name)
     return _confirmations(update_ok, removals_ok, confirmed)
 
@@ -756,9 +793,10 @@ def _apply_update_command(
     plan: UpdatePlan,
     confirmations: UpdateConfirmations,
     initiator: Initiator,
+    token: str,
 ) -> TenantRecord:
     try:
-        return service.apply_update(plan, confirmations, initiator).record
+        return service.apply_update(plan, confirmations, initiator, token=token).record
     except TenantNotFoundError:
         _missing_tenant(plan.tenant_id)
     except (UpdateNotAllowedError, ConfirmationRequiredError, StalePlanError) as exc:
@@ -773,6 +811,8 @@ def _apply_update_command(
         _lost_write()
     except RegistryUnavailableError as exc:
         _reject_unwritable_state(exc)
+    except AuditLogError:
+        _reject_audit()
 
 
 def _echo_updated(record: TenantRecord) -> None:
@@ -812,7 +852,7 @@ def _print_destroy_plan(plan: DestroyPlan) -> None:
     typer.echo(plan.statement)
 
 
-def _destroy_confirmed(tenant_id: str, yes: bool) -> None:
+def _destroy_confirmed(tenant_id: str, yes: bool, on_no: Callable[[], None]) -> None:
     if yes:
         return
     if not _printable_ascii(tenant_id):
@@ -820,17 +860,17 @@ def _destroy_confirmed(tenant_id: str, yes: bool) -> None:
             "cannot confirm this tenant id interactively; pass --yes",
             err=True,
         )
-        raise typer.Exit(1)
+        _stop(on_no)
     if not _stdin_is_terminal():
         typer.echo("confirmation required; pass --yes", err=True)
-        raise typer.Exit(1)
+        _stop(on_no)
     typer.echo("Type the tenant id to confirm destroy:")
     try:
         answer = input()
     except EOFError:
-        raise typer.Exit(1) from None
+        _stop(on_no)
     if answer != tenant_id:
-        raise typer.Exit(1)
+        _stop(on_no)
 
 
 def _printable_ascii(value: str) -> bool:
@@ -841,9 +881,10 @@ def _apply_destroy_command(
     service: PlatformService,
     plan: DestroyPlan,
     initiator: Initiator,
+    token: str,
 ) -> TenantRecord:
     try:
-        return service.apply_destroy(plan, True, initiator).record
+        return service.apply_destroy(plan, True, initiator, token=token).record
     except TenantNotFoundError:
         _missing_tenant(plan.tenant_id)
     except (DestroyNotAllowedError, ConfirmationRequiredError, StalePlanError) as exc:
@@ -854,6 +895,8 @@ def _apply_destroy_command(
         _lost_write()
     except RegistryUnavailableError as exc:
         _reject_unwritable_state(exc)
+    except AuditLogError:
+        _reject_audit()
 
 
 def _echo_destroyed(record: TenantRecord) -> None:
@@ -861,6 +904,30 @@ def _echo_destroyed(record: TenantRecord) -> None:
     status = _escape_stored(record.status.value)
     typer.echo(f"destroyed: {tenant_id} status {status}")
     _echo_status(record)
+
+
+def _stop(on_no: Callable[[], None]) -> NoReturn:
+    on_no()
+    raise typer.Exit(1)
+
+
+def _record_decline(decline: Callable[[], None]) -> None:
+    try:
+        decline()
+    except AuditLogError:
+        _reject_audit()
+
+
+def _confirmed_token(confirm: Callable[[], str]) -> str:
+    try:
+        return confirm()
+    except AuditLogError:
+        _reject_audit()
+
+
+def _reject_audit() -> NoReturn:
+    typer.echo("cannot write the audit log", err=True)
+    raise typer.Exit(2) from None
 
 
 def _echo_failed_destroy(tenant_id: str, exc: DestroyFailedError) -> NoReturn:

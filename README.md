@@ -361,10 +361,10 @@ Not built yet:
 
 - A Terraform executor or an AWS executor
 - An agent
-- Confirmation tokens: the issuer and the verifier exist in `core/` and are not used yet
+- Confirmation tokens: `create`, `update`, `destroy`, and `sweep` use the issuer and the verifier in `core/`. An agent does not
 - A `chat` command
 - An MCP server
-- An audit log: the JSON-lines sink and a fake CloudWatch sink exist in `core/` and are not used yet, and there is no real CloudWatch sink
+- An audit log: the JSON-lines sink is used by those commands, and there is no real CloudWatch sink
 
 ## Development
 

@@ -13,6 +13,7 @@ from typer.testing import CliRunner, Result
 from self_service_platform.app import app
 from self_service_platform.catalog.catalog import build_catalog
 from self_service_platform.cli.main import _escape_stored, create_app
+from self_service_platform.core.confirmation_issuer import confirmation_pair
 from self_service_platform.core.executor import ExecutorError, ResourceRef
 from self_service_platform.core.manifest import ManifestEntry
 from self_service_platform.core.registry import Clock
@@ -110,6 +111,19 @@ def _clock(now: datetime) -> Clock:
     return lambda: now
 
 
+class _Audit:
+    def __init__(self) -> None:
+        self.entries: list[object] = []
+
+    def write(self, entry: object) -> None:
+        self.entries.append(entry)
+
+
+def _deps(clock: Clock) -> tuple[object, object, object]:
+    issuer, verifier = confirmation_pair(clock)
+    return _Audit(), issuer, verifier
+
+
 def _record(
     *,
     tenant_id: str,
@@ -197,12 +211,16 @@ def _real_service(
 ) -> Iterator[PlatformService]:
     registry = SqliteRegistry(home / "tenants.sqlite", clock)
     try:
+        audit, issuer, verifier = _deps(clock)
         yield PlatformService(
             catalog=build_catalog(),
             registry=registry,
             executor=FakeExecutor() if executor is None else executor,
             clock=clock,
             ttl_policy=TtlPolicy(dev=timedelta(days=1), ephemeral=timedelta(hours=3)),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
     finally:
         registry.close()
@@ -346,12 +364,16 @@ def test_sweep_yes_exits_2_when_the_state_cannot_be_written(
     blocked = tmp_path / "blocked"
     registry = SqliteRegistry(ssp_home / "tenants.sqlite", _clock(T0))
     try:
+        audit, issuer, verifier = _deps(_clock(T0))
         service = PlatformService(
             catalog=build_catalog(),
             registry=_Unwritable(registry, blocked),
             executor=FakeExecutor(),
             clock=_clock(T0),
             ttl_policy=TtlPolicy(dev=timedelta(days=1), ephemeral=timedelta(hours=3)),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
         result = _invoke(
             _application(_clock(T0), open_service=lambda: service),

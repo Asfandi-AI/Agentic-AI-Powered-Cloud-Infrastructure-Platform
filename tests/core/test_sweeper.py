@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 
 from self_service_platform.catalog.catalog import Catalog, build_catalog
+from self_service_platform.core.audit import (
+    AuditEntry,
+    AuditLogError,
+    Decision,
+    Outcome,
+    ToolName,
+)
+from self_service_platform.core.confirmation_issuer import confirmation_pair
 from self_service_platform.core.executor import (
     ExecutorError,
     ProvisionRequest,
@@ -80,6 +88,17 @@ _FROM_ACTIVE: dict[TenantStatus, tuple[tuple[TenantStatus, TenantStatus], ...]] 
         (TenantStatus.DESTROYING, TenantStatus.DESTROY_FAILED),
     ),
 }
+
+
+class RecordingAudit:
+    def __init__(self) -> None:
+        self.entries: list[AuditEntry] = []
+        self.fail_decisions = False
+
+    def write(self, entry: AuditEntry) -> None:
+        if self.fail_decisions and entry.decision is not None:
+            raise AuditLogError(1)
+        self.entries.append(entry)
 
 
 class MutableClock:
@@ -277,6 +296,7 @@ class World:
     executor: _Guarded
     service: PlatformService
     catalog: Catalog
+    audit: RecordingAudit
 
 
 def _manifest() -> Manifest:
@@ -305,18 +325,24 @@ def _open_world(tmp_path: Path, kind: str) -> Iterator[World]:
             inner = LocalExecutor(tmp_path / "executor.sqlite")
         executor = _Guarded(inner)
         catalog = build_catalog()
+        audit = RecordingAudit()
+        issuer, verifier = confirmation_pair(clock)
         service = PlatformService(
             catalog=catalog,
             registry=registry,
             executor=executor,
             clock=clock,
             ttl_policy=_policy(),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
         yield World(
             registry=registry,
             executor=executor,
             service=service,
             catalog=catalog,
+            audit=audit,
         )
     finally:
         registry.close()
@@ -395,12 +421,16 @@ def _service_on(
     world: World,
     registry: _StaleOnSecondGet | _RejectDestroying,
 ) -> PlatformService:
+    issuer, verifier = confirmation_pair(_fixed(T0))
     return PlatformService(
         catalog=world.catalog,
         registry=registry,
         executor=world.executor,
         clock=_fixed(T0),
         ttl_policy=_policy(),
+        audit_log=world.audit,
+        issuer=issuer,
+        verifier=verifier,
     )
 
 
@@ -961,12 +991,16 @@ def test_a_swept_tenant_follows_the_destroy_path(tmp_path: Path) -> None:
         log: list[str] = []
         registry = _RecordingRegistry(world.registry, log)
         executor = _RecordingExecutor(world.executor, log)
+        issuer, verifier = confirmation_pair(_fixed(T0))
         service = PlatformService(
             catalog=world.catalog,
             registry=registry,
             executor=executor,
             clock=_fixed(T0),
             ttl_policy=_policy(),
+            audit_log=world.audit,
+            issuer=issuer,
+            verifier=verifier,
         )
 
         Sweeper(registry, _fixed(T0), service).sweep(dry_run=False)
@@ -1176,4 +1210,55 @@ def test_a_naive_clock_is_rejected(tmp_path: Path) -> None:
             Sweeper(world.registry, naive, world.service).sweep(dry_run=True)
 
         assert world.registry.get("demo") == before
+        assert world.executor.destroy_calls == []
+
+
+def test_the_sweeper_initiator_is_recorded(tmp_path: Path) -> None:
+    with _open_world(tmp_path, "fake") as world:
+        _insert(
+            world,
+            _record(
+                tenant_id="demo",
+                expires_at=T0,
+                catalog_version=world.catalog.catalog_version,
+            ),
+        )
+
+        Sweeper(world.registry, _fixed(T0), world.service).sweep(dry_run=False)
+
+        destroyed = [
+            entry
+            for entry in world.audit.entries
+            if entry.tool_name is ToolName.DESTROY
+        ]
+        assert [
+            entry.decision for entry in destroyed if entry.decision is not None
+        ] == [Decision.CONFIRMED]
+        succeeded = [entry for entry in destroyed if entry.outcome is Outcome.SUCCEEDED]
+        assert len(succeeded) == 1
+        assert succeeded[0].initiator_kind is InitiatorKind.SWEEPER
+        assert succeeded[0].initiator_owner == "sweeper"
+        assert world.registry.get("demo").status is TenantStatus.DESTROYED
+
+
+def test_an_audit_failure_stops_the_sweep_before_the_next_tenant(
+    tmp_path: Path,
+) -> None:
+    with _open_world(tmp_path, "fake") as world:
+        for tenant_id in ("early", "later"):
+            _insert(
+                world,
+                _record(
+                    tenant_id=tenant_id,
+                    expires_at=T0,
+                    catalog_version=world.catalog.catalog_version,
+                ),
+            )
+        world.audit.fail_decisions = True
+
+        with pytest.raises(AuditLogError):
+            Sweeper(world.registry, _fixed(T0), world.service).sweep(dry_run=False)
+
+        assert world.registry.get("early").status is TenantStatus.ACTIVE
+        assert world.registry.get("later").status is TenantStatus.ACTIVE
         assert world.executor.destroy_calls == []

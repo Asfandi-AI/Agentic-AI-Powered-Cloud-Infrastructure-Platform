@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import TypeVar
 
 from self_service_platform.catalog.catalog import build_catalog
+from self_service_platform.core.audit import AuditEntry, Outcome, ToolName
+from self_service_platform.core.audit_file import JsonLinesAuditLog
+from self_service_platform.core.confirmation_issuer import confirmation_pair
 from self_service_platform.core.registry import Clock, Registry
 from self_service_platform.core.service import PlatformService, TtlPolicy
 from self_service_platform.core.tenant import (
@@ -61,12 +64,17 @@ def _utc_now() -> datetime:
 
 
 def build_service() -> PlatformService:
+    clock = _utc_now
+    issuer, verifier = confirmation_pair(clock)
     return PlatformService(
         catalog=build_catalog(),
-        registry=_WritableRegistry(database_path(), _utc_now),
+        registry=_WritableRegistry(database_path(), clock),
         executor=build_executor(),
-        clock=_utc_now,
+        clock=clock,
         ttl_policy=TtlPolicy(dev=_DEV_TTL, ephemeral=_EPHEMERAL_TTL),
+        audit_log=_AuditAfterStateExists(state_directory()),
+        issuer=issuer,
+        verifier=verifier,
     )
 
 
@@ -150,6 +158,38 @@ def _prepare_database(path: Path) -> None:
         create_state_directory(path.parent)
     except RegistryUnavailableError as exc:
         raise RegistryUnavailableError(path) from exc
+
+
+class _AuditAfterStateExists:
+    """Writes audit.jsonl when an execute or destroy succeeds.
+
+    Entries stay in memory until that success. A plan, a decline, a refusal,
+    or a failed attempt does not create SSP_HOME and does not change a state
+    directory that already exists. The registry creates the directory before
+    the success entry is recorded.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+        self._sink = JsonLinesAuditLog(directory)
+        self._pending: list[AuditEntry] = []
+
+    def write(self, entry: AuditEntry) -> None:
+        self._pending.append(entry)
+        if not _succeeded_mutation(entry) or not self._directory.is_dir():
+            return
+        pending = self._pending
+        self._pending = []
+        for item in pending:
+            self._sink.write(item)
+
+
+def _succeeded_mutation(entry: AuditEntry) -> bool:
+    return entry.outcome is Outcome.SUCCEEDED and entry.tool_name in {
+        ToolName.EXECUTE_CREATE,
+        ToolName.EXECUTE_UPDATE,
+        ToolName.DESTROY,
+    }
 
 
 class _MissingState:

@@ -13,6 +13,24 @@ from self_service_platform.catalog.component import (
     CostLineItem,
     DeletionBehaviour,
 )
+from self_service_platform.core.audit import (
+    AuditEntry,
+    AuditLogError,
+    Decision,
+    Outcome,
+    ToolName,
+)
+from self_service_platform.core.confirmation import (
+    ConfirmationVerifier,
+    PlanMismatchError,
+    TokenAlreadyUsedError,
+    TokenExpiredError,
+    UnknownTokenError,
+)
+from self_service_platform.core.confirmation_issuer import (
+    ConfirmationIssuer,
+    confirmation_pair,
+)
 from self_service_platform.core.cost import estimate_cost
 from self_service_platform.core.diff import compute_diff
 from self_service_platform.core.executor import (
@@ -69,12 +87,55 @@ EPHEMERAL_TTL = timedelta(hours=3)
 _LONG_ERROR = "e" * (ERROR_TEXT_LIMIT + 10)
 
 
+_FIXED_TOKEN = "fixed-confirmation-token-value"
+_ARGUMENT_KEYS = {
+    "catalog_version",
+    "component_type",
+    "data_loss_confirmed",
+    "dry_run",
+    "manifest_entry_count",
+    "removal_count",
+    "replacement_count",
+}
+
+
 class MutableClock:
     def __init__(self, now: datetime) -> None:
         self.now = now
 
     def __call__(self) -> datetime:
         return self.now
+
+
+class RecordingAudit:
+    """In-memory sink. Flags raise AuditLogError before the entry is stored."""
+
+    def __init__(self) -> None:
+        self.entries: list[AuditEntry] = []
+        self.fail_decisions = False
+        self.fail_refusals = False
+        self.fail_execute_success = False
+
+    def write(self, entry: AuditEntry) -> None:
+        if self.fail_decisions and entry.decision is not None:
+            raise AuditLogError(1)
+        if self.fail_refusals and entry.outcome is Outcome.REFUSED:
+            raise AuditLogError(1)
+        if (
+            self.fail_execute_success
+            and entry.outcome is Outcome.SUCCEEDED
+            and entry.tool_name is ToolName.EXECUTE_CREATE
+        ):
+            raise AuditLogError(1)
+        self.entries.append(entry)
+
+
+def _gate(
+    clock: MutableClock,
+    audit: RecordingAudit | None = None,
+) -> tuple[RecordingAudit, ConfirmationIssuer, ConfirmationVerifier]:
+    issuer, verifier = confirmation_pair(clock)
+    return RecordingAudit() if audit is None else audit, issuer, verifier
 
 
 class RecordingRegistry:
@@ -233,12 +294,16 @@ def _bundle(sqlite: SqliteRegistry, clock: MutableClock) -> Bundle:
     fake = FakeExecutor()
     executor = RecordingExecutor(fake, sqlite, calls)
     registry = RecordingRegistry(sqlite, calls)
+    audit, issuer, verifier = _gate(clock)
     service = PlatformService(
         catalog=catalog,
         registry=registry,
         executor=executor,
         clock=clock,
         ttl_policy=_policy(),
+        audit_log=audit,
+        issuer=issuer,
+        verifier=verifier,
     )
     return Bundle(
         service=service,
@@ -421,12 +486,16 @@ def test_failed_provision_leaves_creating_and_keeps_partial_resources(
             tmp_path / "local-executor.sqlite",
             calls,
         )
+        audit, issuer, verifier = _gate(clock)
         service = PlatformService(
             catalog=build_catalog(),
             registry=sqlite,
             executor=executor,
             clock=clock,
             ttl_policy=_policy(),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
         plan = service.plan_create(TENANT_ID, TenantType.DEV, "alice", _manifest())
 
@@ -497,12 +566,16 @@ def test_non_executor_error_propagates_and_leaves_creating(tmp_path: Path) -> No
     clock = MutableClock(T0)
     executor = KeyErrorExecutor()
     with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        audit, issuer, verifier = _gate(clock)
         service = PlatformService(
             catalog=build_catalog(),
             registry=sqlite,
             executor=executor,
             clock=clock,
             ttl_policy=_policy(),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
         plan = service.plan_create(TENANT_ID, TenantType.DEV, "alice", _manifest())
 
@@ -522,12 +595,16 @@ def test_failed_activation_leaves_creating_and_keeps_resources(
     with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
         registry = ActivationFails(sqlite)
         executor = RecordingExecutor(FakeExecutor(), sqlite, calls)
+        audit, issuer, verifier = _gate(clock)
         service = PlatformService(
             catalog=build_catalog(),
             registry=registry,
             executor=executor,
             clock=clock,
             ttl_policy=_policy(),
+            audit_log=audit,
+            issuer=issuer,
+            verifier=verifier,
         )
         plan = service.plan_create(TENANT_ID, TenantType.DEV, "alice", _manifest())
 
@@ -699,12 +776,16 @@ def _update_service(
     catalog: Catalog,
     calls: list[str],
 ) -> PlatformService:
+    audit, issuer, verifier = _gate(clock)
     return PlatformService(
         catalog=catalog,
         registry=RecordingRegistry(sqlite, calls),
         executor=RecordingExecutor(FakeExecutor(), sqlite, calls),
         clock=clock,
         ttl_policy=_policy(),
+        audit_log=audit,
+        issuer=issuer,
+        verifier=verifier,
     )
 
 
@@ -1142,12 +1223,16 @@ def _service(
     executor: Executor,
     clock: MutableClock,
 ) -> PlatformService:
+    audit, issuer, verifier = _gate(clock)
     return PlatformService(
         catalog=catalog,
         registry=registry,
         executor=executor,
         clock=clock,
         ttl_policy=_policy(),
+        audit_log=audit,
+        issuer=issuer,
+        verifier=verifier,
     )
 
 
@@ -2709,3 +2794,449 @@ def test_expired_tenant_can_be_destroyed(tmp_path: Path) -> None:
 
         assert plan.status is TenantStatus.ACTIVE
         assert result.record.status is TenantStatus.DESTROYED
+
+
+class _BoomExecutor:
+    def provision(self, request: ProvisionRequest) -> None:
+        raise ExecutorError("provision failed")
+
+    def destroy(self, tenant_id: str) -> None:
+        raise AssertionError(tenant_id)
+
+    def list_tagged_resources(
+        self,
+        tenant_id: str,
+        component: str | None = None,
+    ) -> tuple[ResourceRef, ...]:
+        return ()
+
+    def tenant_role_exists(self, tenant_id: str) -> bool:
+        return False
+
+
+def _wired(
+    sqlite: SqliteRegistry,
+    clock: MutableClock,
+    audit: RecordingAudit | None = None,
+    executor: Executor | None = None,
+) -> tuple[PlatformService, RecordingAudit, list[str]]:
+    calls: list[str] = []
+    chosen, issuer, verifier = _gate(clock, audit)
+    used = (
+        executor
+        if executor is not None
+        else RecordingExecutor(FakeExecutor(), sqlite, calls)
+    )
+    service = PlatformService(
+        catalog=build_catalog(),
+        registry=RecordingRegistry(sqlite, calls),
+        executor=used,
+        clock=clock,
+        ttl_policy=_policy(),
+        audit_log=chosen,
+        issuer=issuer,
+        verifier=verifier,
+    )
+    return service, chosen, calls
+
+
+def _create_plan(service: PlatformService, tenant_id: str = TENANT_ID):
+    return service.plan_create(tenant_id, TenantType.DEV, "alice", _manifest())
+
+
+def _active(service: PlatformService, tenant_id: str = TENANT_ID) -> object:
+    plan = _create_plan(service, tenant_id)
+    token = service.confirm_create(plan, _initiator())
+    return service.apply_create(plan, True, _initiator(), token=token)
+
+
+def _entries(audit: RecordingAudit, tool: ToolName) -> list[AuditEntry]:
+    return [entry for entry in audit.entries if entry.tool_name is tool]
+
+
+def _assert_untouched(calls: list[str], sqlite: SqliteRegistry) -> None:
+    assert "create_tenant" not in calls
+    assert "transition" not in calls
+    assert "provision" not in calls
+    assert "destroy" not in calls
+    _assert_absent(sqlite)
+
+
+def test_a_bad_token_refuses_create_update_and_destroy_without_a_write(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, calls = _wired(sqlite, clock)
+        create_plan = _create_plan(service)
+        other = _create_plan(service, "tenant-b")
+        wrong = service.confirm_create(other, _initiator())
+        with pytest.raises(UnknownTokenError):
+            service.apply_create(create_plan, True, _initiator(), token="")
+        with pytest.raises(UnknownTokenError):
+            service.apply_create(
+                create_plan,
+                True,
+                _initiator(),
+                token="unknown-token-value",
+            )
+        with pytest.raises(PlanMismatchError):
+            service.apply_create(create_plan, True, _initiator(), token=wrong)
+        expired = service.confirm_create(create_plan, _initiator())
+        clock.now = T0 + timedelta(minutes=15)
+        with pytest.raises(TokenExpiredError):
+            service.apply_create(create_plan, True, _initiator(), token=expired)
+        _assert_untouched(calls, sqlite)
+        assert all(
+            entry.outcome is Outcome.REFUSED
+            for entry in _entries(audit, ToolName.EXECUTE_CREATE)
+        )
+
+        clock.now = T0
+        _active(service)
+        calls.clear()
+        stored = sqlite.get(TENANT_ID)
+        update_plan = service.plan_update(
+            TENANT_ID,
+            _manifest(("s3-bucket", "uploads")),
+        )
+        update_token = service.confirm_update(
+            update_plan,
+            _initiator(),
+            data_loss_confirmed=True,
+            confirmed_replacements=frozenset(),
+        )
+        destroy_plan = service.plan_destroy(TENANT_ID)
+        destroy_token = service.confirm_destroy(destroy_plan, _initiator())
+        flags = UpdateConfirmations(
+            update=True,
+            removals=True,
+            replacements=frozenset(),
+        )
+        with pytest.raises(UnknownTokenError):
+            service.apply_update(update_plan, flags, _initiator(), token="")
+        with pytest.raises(UnknownTokenError):
+            service.apply_update(
+                update_plan,
+                flags,
+                _initiator(),
+                token="unknown-token-value",
+            )
+        with pytest.raises(PlanMismatchError):
+            service.apply_update(update_plan, flags, _initiator(), token=destroy_token)
+        with pytest.raises(UnknownTokenError):
+            service.apply_destroy(destroy_plan, True, _initiator(), token="")
+        with pytest.raises(UnknownTokenError):
+            service.apply_destroy(
+                destroy_plan,
+                True,
+                _initiator(),
+                token="unknown-token-value",
+            )
+        with pytest.raises(PlanMismatchError):
+            service.apply_destroy(
+                destroy_plan,
+                True,
+                _initiator(),
+                token=update_token,
+            )
+        clock.now = T0 + timedelta(minutes=15)
+        with pytest.raises(TokenExpiredError):
+            service.apply_update(update_plan, flags, _initiator(), token=update_token)
+        with pytest.raises(TokenExpiredError):
+            service.apply_destroy(
+                destroy_plan,
+                True,
+                _initiator(),
+                token=destroy_token,
+            )
+        assert "transition" not in calls
+        assert "provision" not in calls
+        assert "destroy" not in calls
+        assert sqlite.get(TENANT_ID) == stored
+
+
+def test_a_reused_token_is_refused(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, _audit, calls = _wired(sqlite, clock)
+        plan = _create_plan(service)
+        token = service.confirm_create(plan, _initiator())
+        service.apply_create(plan, True, _initiator(), token=token)
+        calls.clear()
+
+        with pytest.raises(TokenAlreadyUsedError):
+            service.apply_create(plan, True, _initiator(), token=token)
+
+        assert calls == []
+        assert sqlite.get(TENANT_ID).status is TenantStatus.ACTIVE
+
+
+def test_missing_update_flags_do_not_consume_the_token(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, _audit, _calls = _wired(sqlite, clock)
+        _active(service)
+        plan = service.plan_update(TENANT_ID, _manifest(("s3-bucket", "uploads")))
+        token = service.confirm_update(
+            plan,
+            _initiator(),
+            data_loss_confirmed=True,
+            confirmed_replacements=frozenset(),
+        )
+        with pytest.raises(ConfirmationRequiredError):
+            service.apply_update(
+                plan,
+                UpdateConfirmations(
+                    update=True, removals=False, replacements=frozenset()
+                ),
+                _initiator(),
+                token=token,
+            )
+
+        result = service.apply_update(
+            plan,
+            UpdateConfirmations(update=True, removals=True, replacements=frozenset()),
+            _initiator(),
+            token=token,
+        )
+
+        assert result.changed is True
+        assert sqlite.get(TENANT_ID).status is TenantStatus.ACTIVE
+
+
+def test_confirm_create_records_the_decision_and_execute_create_succeeds(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, _calls = _wired(sqlite, clock)
+        plan = _create_plan(service)
+        token = service.confirm_create(plan, _initiator())
+        result = service.apply_create(plan, True, _initiator(), token=token)
+
+        assert result.record.status is TenantStatus.ACTIVE
+        confirmed = [
+            entry
+            for entry in audit.entries
+            if entry.decision is Decision.CONFIRMED
+            and entry.tool_name is ToolName.EXECUTE_CREATE
+        ]
+        succeeded = _entries(audit, ToolName.EXECUTE_CREATE)
+        assert len(confirmed) == 1
+        assert confirmed[0].outcome is None
+        assert confirmed[0].arguments == {}
+        assert [entry.outcome for entry in succeeded if entry.decision is None] == [
+            Outcome.SUCCEEDED
+        ]
+        recorded = next(
+            entry for entry in succeeded if entry.outcome is Outcome.SUCCEEDED
+        )
+        assert set(recorded.arguments) == _ARGUMENT_KEYS
+        assert recorded.arguments["catalog_version"] == plan.catalog_version
+        assert recorded.arguments["manifest_entry_count"] == 2
+        assert recorded.initiator_kind is InitiatorKind.CLI
+
+
+def test_decline_create_records_declined_and_creates_nothing(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, calls = _wired(sqlite, clock)
+        plan = _create_plan(service)
+        service.decline_create(plan, _initiator())
+
+        declined = [
+            entry
+            for entry in audit.entries
+            if entry.decision is Decision.DECLINED
+            and entry.tool_name is ToolName.EXECUTE_CREATE
+        ]
+        assert len(declined) == 1
+        assert declined[0].arguments == {}
+        _assert_untouched(calls, sqlite)
+
+
+def test_confirm_and_decline_update_record_the_counts(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, _calls = _wired(sqlite, clock)
+        _active(service)
+        plan = service.plan_update(TENANT_ID, _manifest(("s3-bucket", "uploads")))
+        declined = service.plan_update(TENANT_ID, _manifest(("sqs-queue", "jobs")))
+        service.decline_update(declined, _initiator())
+        token = service.confirm_update(
+            plan,
+            _initiator(),
+            data_loss_confirmed=True,
+            confirmed_replacements=frozenset(),
+        )
+        service.apply_update(
+            plan,
+            UpdateConfirmations(update=True, removals=True, replacements=frozenset()),
+            _initiator(),
+            token=token,
+        )
+
+        decisions = [
+            entry
+            for entry in _entries(audit, ToolName.EXECUTE_UPDATE)
+            if entry.decision is not None
+        ]
+        assert [entry.decision for entry in decisions] == [
+            Decision.DECLINED,
+            Decision.CONFIRMED,
+        ]
+        succeeded = next(
+            entry
+            for entry in _entries(audit, ToolName.EXECUTE_UPDATE)
+            if entry.outcome is Outcome.SUCCEEDED
+        )
+        assert succeeded.arguments["data_loss_confirmed"] is True
+        assert succeeded.arguments["removal_count"] == 1
+        assert succeeded.arguments["replacement_count"] == 0
+
+
+def test_confirm_and_decline_destroy_record_the_decision(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, _calls = _wired(sqlite, clock)
+        _active(service)
+        plan = service.plan_destroy(TENANT_ID)
+        service.decline_destroy(plan, _initiator())
+        assert sqlite.get(TENANT_ID).status is TenantStatus.ACTIVE
+        token = service.confirm_destroy(plan, _initiator())
+        result = service.apply_destroy(plan, True, _initiator(), token=token)
+
+        assert result.record.status is TenantStatus.DESTROYED
+        decisions = [
+            entry
+            for entry in _entries(audit, ToolName.DESTROY)
+            if entry.decision is not None
+        ]
+        assert [entry.decision for entry in decisions] == [
+            Decision.DECLINED,
+            Decision.CONFIRMED,
+        ]
+        succeeded = next(
+            entry
+            for entry in _entries(audit, ToolName.DESTROY)
+            if entry.outcome is Outcome.SUCCEEDED
+        )
+        assert succeeded.arguments["data_loss_confirmed"] is True
+        assert succeeded.initiator_kind is InitiatorKind.CLI
+
+
+def test_a_failed_decision_write_returns_no_token(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    audit = RecordingAudit()
+    audit.fail_decisions = True
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, _audit, calls = _wired(sqlite, clock, audit)
+        plan = _create_plan(service)
+
+        with pytest.raises(AuditLogError):
+            service.confirm_create(plan, _initiator())
+
+        _assert_untouched(calls, sqlite)
+
+
+def test_a_failed_refusal_write_leaves_no_tenant(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    audit = RecordingAudit()
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, _audit, calls = _wired(sqlite, clock, audit)
+        plan = _create_plan(service)
+        service.confirm_create(plan, _initiator())
+        audit.fail_refusals = True
+
+        with pytest.raises(AuditLogError):
+            service.apply_create(plan, True, _initiator(), token="unknown-token-value")
+
+        _assert_untouched(calls, sqlite)
+
+
+def test_a_failed_success_write_leaves_the_tenant(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    audit = RecordingAudit()
+    audit.fail_execute_success = True
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, _audit, _calls = _wired(sqlite, clock, audit)
+        plan = _create_plan(service)
+        token = service.confirm_create(plan, _initiator())
+
+        with pytest.raises(AuditLogError):
+            service.apply_create(plan, True, _initiator(), token=token)
+
+        assert sqlite.get(TENANT_ID).status is TenantStatus.ACTIVE
+
+
+def test_the_audit_text_does_not_contain_the_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "self_service_platform.core.confirmation_issuer.secrets.token_urlsafe",
+        lambda _size: _FIXED_TOKEN,
+    )
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, _calls = _wired(sqlite, clock)
+        _active(service)
+
+        rendered = str(audit.entries)
+        assert _FIXED_TOKEN not in rendered
+        assert all("token" not in entry.arguments for entry in audit.entries)
+
+
+def test_plan_create_and_plan_update_record_the_tool(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, _calls = _wired(sqlite, clock)
+        plan = _create_plan(service)
+        created = _entries(audit, ToolName.PLAN_CREATE)[-1]
+        assert created.outcome is Outcome.SUCCEEDED
+        assert created.decision is None
+        assert created.arguments["catalog_version"] == plan.catalog_version
+        assert created.arguments["manifest_entry_count"] == 2
+        _active(service)
+        update = service.plan_update(TENANT_ID, _manifest(("s3-bucket", "uploads")))
+        planned = _entries(audit, ToolName.PLAN_UPDATE)[-1]
+        assert planned.outcome is Outcome.SUCCEEDED
+        assert planned.arguments["removal_count"] == len(update.removals)
+        assert planned.arguments["manifest_entry_count"] == 1
+
+
+def test_a_validation_failure_is_refused(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, calls = _wired(sqlite, clock)
+        manifest = Manifest.model_validate(
+            [{"type": "no-such-type", "name": "uploads"}]
+        )
+
+        with pytest.raises(ManifestValidationError):
+            service.plan_create(TENANT_ID, TenantType.DEV, "alice", manifest)
+
+        refused = _entries(audit, ToolName.PLAN_CREATE)[-1]
+        assert refused.outcome is Outcome.REFUSED
+        _assert_untouched(calls, sqlite)
+
+
+def test_an_executor_failure_records_failed_and_leaves_creating(tmp_path: Path) -> None:
+    clock = MutableClock(T0)
+    with SqliteRegistry(tmp_path / "tenants.sqlite", clock) as sqlite:
+        service, audit, _calls = _wired(sqlite, clock, executor=_BoomExecutor())
+        plan = _create_plan(service)
+        token = service.confirm_create(plan, _initiator())
+
+        with pytest.raises(ProvisionFailedError):
+            service.apply_create(plan, True, _initiator(), token=token)
+
+        assert sqlite.get(TENANT_ID).status is TenantStatus.CREATING
+        failed = [
+            entry
+            for entry in _entries(audit, ToolName.EXECUTE_CREATE)
+            if entry.outcome is Outcome.FAILED
+        ]
+        assert len(failed) == 1
+        assert "provision failed" not in str(failed[0].arguments)
