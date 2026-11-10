@@ -176,6 +176,16 @@ The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm
 
 The issuer and the verifier exist in `core/` and nothing calls them yet, so requirement 11.3 is not enforced for `apply_create`, `apply_update` and `apply_destroy`. The store is in memory and process-local. The 15-minute lifetime is a POC value, not from the spec. The digest does not include the Initiator. An Audit_Log entry must never contain the token string (requirement 13.3).
 
+## Audit log
+
+The JSON-lines sink and a fake CloudWatch sink exist in `core/` and nothing calls them yet, so requirements 13.1 and 13.2 are not met in practice. There is no real CloudWatch sink, so 13.5 is half done.
+
+When a sink fails the library tries every sink and raises. Whether execute or destroy may proceed when the audit write fails is undecided. The recommendation is that they must not proceed.
+
+Every write calls `fsync`, which costs speed. On Windows the file has no user-only ACL guarantee and concurrent append atomicity is not verified, and the same holds for network file systems.
+
+The allow-list stops secret argument keys, but an identity field that a caller fills with a secret would be stored. The audit file contains the operating system user name. Requirement 9.4 and decision 8 are not expressed in `core/policy.py`.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).

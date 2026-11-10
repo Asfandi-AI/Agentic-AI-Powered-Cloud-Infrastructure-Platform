@@ -364,7 +364,7 @@ Not built yet:
 - Confirmation tokens: the issuer and the verifier exist in `core/` and are not used yet
 - A `chat` command
 - An MCP server
-- An audit log
+- An audit log: the JSON-lines sink and a fake CloudWatch sink exist in `core/` and are not used yet, and there is no real CloudWatch sink
 
 ## Development
 
