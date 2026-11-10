@@ -379,6 +379,10 @@ ssp --version
 
 CI runs ruff, mypy and pytest on Ubuntu and Windows, audits the locked dependencies, and builds and smoke-tests the package. `uv build` writes a wheel and a source distribution in `dist/` and does not publish them. `ssp --version` prints the installed package version and exits.
 
+## Architecture decisions
+
+Accepted decisions are in [docs/adr/](docs/adr/).
+
 ## Open questions
 
 See [docs/open-questions.md](docs/open-questions.md).
