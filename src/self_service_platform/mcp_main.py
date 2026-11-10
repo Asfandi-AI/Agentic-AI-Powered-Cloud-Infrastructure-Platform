@@ -7,13 +7,18 @@ from collections.abc import Mapping
 from typing import Any, NoReturn, TextIO
 
 from self_service_platform.agent.mcp_server import McpSession
+from self_service_platform.core.audit import AuditLogError
 from self_service_platform.core.tenant import Initiator, InitiatorKind
 from self_service_platform.wiring import build_service
 
 
 def main() -> None:
     """Serve MCP on stdin and stdout until the client closes the pipe."""
-    service = build_service()
+    try:
+        service = build_service()
+    except AuditLogError:
+        sys.stderr.write("cannot write the audit log\n")
+        raise SystemExit(2) from None
     initiator = Initiator(kind=InitiatorKind.AGENT, owner=_owner())
     session_box: list[McpSession] = []
 

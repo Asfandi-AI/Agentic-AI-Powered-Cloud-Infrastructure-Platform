@@ -1,4 +1,4 @@
-"""Audit entries. Nothing in the CLI or the service calls this module yet."""
+"""Audit entries and the composite sink."""
 
 import json
 import re
@@ -120,14 +120,17 @@ class CompositeAuditLog:
 
     def write(self, entry: AuditEntry) -> None:
         failed = 0
+        cause: BaseException | None = None
         for sink in self._sinks:
             try:
                 sink.write(entry)
-            except Exception:  # noqa: BLE001 - the report is only the failure count
+            except Exception as exc:  # noqa: BLE001 - count each sink, chain the first
                 failed += 1
-        if failed == 0:
+                if cause is None:
+                    cause = exc
+        if cause is None:
             return
-        raise AuditLogError(failed)
+        raise AuditLogError(failed) from cause
 
 
 def record_tool_call(

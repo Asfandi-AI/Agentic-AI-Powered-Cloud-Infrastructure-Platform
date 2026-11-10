@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Requirement 12 asks for an MCP server that exposes the same tools as the agent and enforces the same confirmation rule. Requirement 11 says a confirmation token is issued only when the user confirms that exact plan outside the model. The runtime dependencies are pydantic, PyYAML, and Typer. There is no `mcp` package. `ssp-mcp` must keep stdout for JSON-RPC only, and a plan must ask the client to confirm with `elicitation/create` before any execute tool runs.
+Requirement 12 asks for an MCP server that exposes the same tools as the agent and enforces the same confirmation rule. Requirement 11 says a confirmation token is issued only when the user confirms that exact plan outside the model. The direct runtime dependencies are pydantic, PyYAML, Typer, and boto3. There is no `mcp` package. `ssp-mcp` must keep stdout for JSON-RPC only, and a plan must ask the client to confirm with `elicitation/create` before any execute tool runs.
 
 ## Decision
 

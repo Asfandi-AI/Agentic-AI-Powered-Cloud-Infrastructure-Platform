@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -8,10 +9,16 @@ from typing import TypeVar, cast
 import boto3
 
 from self_service_platform.agent.loop import run_chat
-from self_service_platform.audit.cloudwatch import LogsClient, RealCloudWatchAuditLog
+from self_service_platform.audit.cloudwatch import (
+    InvalidLogGroupNameError,
+    LogsClient,
+    RealCloudWatchAuditLog,
+    require_log_group_name,
+)
 from self_service_platform.catalog.catalog import build_catalog
 from self_service_platform.core.audit import (
     AuditEntry,
+    AuditLogError,
     CompositeAuditLog,
     Outcome,
     ToolName,
@@ -20,7 +27,7 @@ from self_service_platform.core.audit_file import JsonLinesAuditLog
 from self_service_platform.core.chat_host import ChatHost
 from self_service_platform.core.confirmation_issuer import confirmation_pair
 from self_service_platform.core.fake_model_client import FakeModelClient
-from self_service_platform.core.model_client import ModelClient
+from self_service_platform.core.model_client import ModelClient, ModelClientError
 from self_service_platform.core.registry import Clock, Registry
 from self_service_platform.core.service import PlatformService, TtlPolicy
 from self_service_platform.core.tenant import (
@@ -41,6 +48,8 @@ _DATABASE_NAME = "tenants.sqlite"
 _EXECUTOR_DATABASE_NAME = "local-executor.sqlite"
 _LOG_STREAM = "ssp-audit-log"
 _DEFAULT_BEDROCK_REGION = "us-east-1"
+_AWS_REGION = re.compile(r"^[a-z]{2,4}(?:-[a-z]+)+-\d$")
+_INVALID_REGION = "invalid AWS region"
 # POC defaults. Not from the spec.
 _DEV_TTL = timedelta(days=1)
 _EPHEMERAL_TTL = timedelta(hours=3)
@@ -176,6 +185,18 @@ def _prepare_database(path: Path) -> None:
         raise RegistryUnavailableError(path) from exc
 
 
+class _InvalidAwsRegionError(Exception):
+    """Raised when a region string is not an AWS region code."""
+
+    def __init__(self) -> None:
+        super().__init__(_INVALID_REGION)
+
+
+def _require_region(region: str) -> None:
+    if _AWS_REGION.fullmatch(region) is None:
+        raise _InvalidAwsRegionError
+
+
 def _setting(name: str) -> str | None:
     value = os.environ.get(name)
     if value is None:
@@ -194,6 +215,10 @@ def build_model_client() -> FakeModelClient | BedrockModelClient:
     region = _setting("SSP_BEDROCK_REGION")
     if region is None:
         region = _DEFAULT_BEDROCK_REGION
+    try:
+        _require_region(region)
+    except _InvalidAwsRegionError as exc:
+        raise ModelClientError(_INVALID_REGION) from exc
     runtime = cast(
         BedrockRuntimeClient,
         boto3.client("bedrock-runtime", region_name=region),
@@ -217,6 +242,11 @@ def _audit_sink(directory: Path) -> JsonLinesAuditLog | CompositeAuditLog:
     group = _setting("SSP_LOG_GROUP")
     if region is None or group is None:
         return file_sink
+    try:
+        _require_region(region)
+        require_log_group_name(group)
+    except (_InvalidAwsRegionError, InvalidLogGroupNameError) as exc:
+        raise AuditLogError(1) from exc
     client = cast(LogsClient, boto3.client("logs", region_name=region))
     cloud = RealCloudWatchAuditLog(client, log_group=group, log_stream=_LOG_STREAM)
     return CompositeAuditLog((file_sink, cloud))

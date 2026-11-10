@@ -6,10 +6,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from self_service_platform.audit.cloudwatch import RealCloudWatchAuditLog
+from typer.testing import CliRunner
 
+from self_service_platform.audit.cloudwatch import (
+    InvalidLogGroupNameError,
+    RealCloudWatchAuditLog,
+)
 from self_service_platform.core.audit import (
     AuditEntry,
+    AuditLogError,
     CompositeAuditLog,
     Outcome,
     ToolName,
@@ -26,6 +31,8 @@ _STREAM = "ssp-audit-log"
 _TIME = datetime(2026, 11, 6, 10, 0, tzinfo=UTC)
 _LATER = datetime(2026, 11, 6, 10, 0, 1, tzinfo=UTC)
 _TIMESTAMP_MS = 1793959200000
+_SECRET = "aws-secret-value"
+_RUNNER = CliRunner()
 _ARGUMENTS = {
     "catalog_version": None,
     "component_type": None,
@@ -122,11 +129,12 @@ def _cloudwatch_error(
     code: str,
     operation: str,
     expected_sequence_token: str | None = None,
+    message: str | None = None,
 ) -> BaseException:
     from botocore.exceptions import ClientError
 
     response: dict[str, object] = {
-        "Error": {"Code": code, "Message": code},
+        "Error": {"Code": code, "Message": code if message is None else message},
         "ResponseMetadata": {"HTTPStatusCode": 400},
     }
     if expected_sequence_token is not None:
@@ -295,6 +303,68 @@ def test_an_invalid_sequence_token_retries_once() -> None:
     assert raised.value.response["Error"]["Code"] == "InvalidSequenceTokenException"
 
 
+def test_an_invalid_sequence_token_without_a_next_token_is_raised() -> None:
+    client = FakeLogsClient()
+    error = _cloudwatch_error("InvalidSequenceTokenException", "PutLogEvents")
+    client.put_errors = [error]
+
+    with pytest.raises(type(error)) as raised:
+        _log(client).write(_entry())
+
+    assert len(_puts(client)) == 1
+    assert "sequenceToken" not in _puts(client)[0]
+    assert raised.value.response["Error"]["Code"] == "InvalidSequenceTokenException"
+
+
+def test_a_data_already_accepted_error_retries_once_with_the_next_token() -> None:
+    client = FakeLogsClient()
+    client.put_errors = [
+        _cloudwatch_error(
+            "DataAlreadyAcceptedException",
+            "PutLogEvents",
+            "token-9",
+        )
+    ]
+
+    _log(client).write(_entry())
+
+    puts = _puts(client)
+    assert len(puts) == 2
+    assert "sequenceToken" not in puts[0]
+    assert puts[1]["sequenceToken"] == "token-9"
+
+
+def test_data_already_accepted_without_a_next_token_is_raised() -> None:
+    client = FakeLogsClient()
+    error = _cloudwatch_error("DataAlreadyAcceptedException", "PutLogEvents")
+    client.put_errors = [error]
+
+    with pytest.raises(type(error)) as raised:
+        _log(client).write(_entry())
+
+    assert len(_puts(client)) == 1
+    assert raised.value.response["Error"]["Code"] == "DataAlreadyAcceptedException"
+
+
+def test_a_legal_log_group_is_sent_and_an_illegal_one_is_refused() -> None:
+    client = FakeLogsClient()
+    legal = "team/app_audit-1.live#A"
+    RealCloudWatchAuditLog(client, log_group=legal, log_stream=_STREAM).write(_entry())
+    assert client.calls[0][1]["logGroupName"] == legal
+
+    refused = FakeLogsClient()
+    with pytest.raises(
+        InvalidLogGroupNameError,
+        match=r"^invalid CloudWatch log group name$",
+    ):
+        RealCloudWatchAuditLog(refused, log_group="bad name", log_stream=_STREAM)
+    with pytest.raises(InvalidLogGroupNameError):
+        RealCloudWatchAuditLog(refused, log_group="log:group", log_stream=_STREAM)
+    with pytest.raises(InvalidLogGroupNameError):
+        RealCloudWatchAuditLog(refused, log_group="a" * 513, log_stream=_STREAM)
+    assert refused.calls == []
+
+
 def test_a_second_write_puts_a_second_event() -> None:
     client = FakeLogsClient()
     log = _log(client)
@@ -363,6 +433,110 @@ def test_wiring_uses_cloudwatch_only_when_region_and_group_are_set(
     monkeypatch.setenv("SSP_AWS_REGION", "eu-west-1")
     monkeypatch.setenv("SSP_LOG_GROUP", "   ")
     assert_file_only()
+
+
+def test_wiring_rejects_an_illegal_log_group_before_creating_a_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import boto3
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_client(service_name: str, *, region_name: str) -> FakeLogsClient:
+        calls.append((service_name, region_name))
+        return FakeLogsClient()
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    illegal = f"{_SECRET} leaked"
+    monkeypatch.setenv("SSP_HOME", str(tmp_path))
+    monkeypatch.setenv("SSP_AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("SSP_LOG_GROUP", illegal)
+    from self_service_platform.wiring import build_service
+
+    with pytest.raises(AuditLogError, match=r"^1 audit sink failed$") as raised:
+        build_service()
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, InvalidLogGroupNameError)
+    assert calls == []
+    assert illegal not in str(raised.value)
+    assert illegal not in str(cause)
+
+
+def test_wiring_rejects_an_invalid_region_before_creating_a_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import boto3
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_client(service_name: str, *, region_name: str) -> FakeLogsClient:
+        calls.append((service_name, region_name))
+        return FakeLogsClient()
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    monkeypatch.setenv("SSP_HOME", str(tmp_path))
+    monkeypatch.setenv("SSP_AWS_REGION", "not-a-region")
+    monkeypatch.setenv("SSP_LOG_GROUP", "platform-audit")
+    from self_service_platform.wiring import build_service
+
+    with pytest.raises(AuditLogError, match=r"^1 audit sink failed$") as raised:
+        build_service()
+
+    assert calls == []
+    assert str(raised.value.__cause__) == "invalid AWS region"
+    assert "not-a-region" not in str(raised.value)
+
+
+def test_the_cli_hides_an_illegal_log_group_and_a_cloudwatch_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import boto3
+
+    from self_service_platform.app import app
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_client(service_name: str, *, region_name: str) -> FakeLogsClient:
+        calls.append((service_name, region_name))
+        client = FakeLogsClient()
+        client.group_error = _cloudwatch_error(
+            "InvalidParameterException",
+            "CreateLogGroup",
+            message=_SECRET,
+        )
+        return client
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    monkeypatch.setenv("SSP_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("SSP_BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("SSP_BEDROCK_REGION", raising=False)
+    command = ["create", "demo", "--type", "dev", "--owner", "alice", "--yes"]
+
+    monkeypatch.setenv("SSP_AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("SSP_LOG_GROUP", "bad name")
+    refused = _RUNNER.invoke(app, command)
+
+    assert refused.exit_code == 2
+    assert refused.stderr == "cannot write the audit log\n"
+    assert refused.stdout == ""
+    assert calls == []
+    assert "bad name" not in refused.stderr
+    assert "Traceback" not in refused.stderr
+
+    monkeypatch.setenv("SSP_LOG_GROUP", "platform-audit")
+    failed = _RUNNER.invoke(app, command)
+    rendered = f"{failed.stdout}\n{failed.stderr}"
+
+    assert failed.exit_code == 2
+    assert failed.stderr == "cannot write the audit log\n"
+    assert calls == [("logs", "eu-west-1")]
+    assert _SECRET not in rendered
+    assert "Traceback" not in rendered
+    assert "InvalidParameterException" not in rendered
 
 
 def test_core_and_cli_cannot_import_the_audit_package() -> None:

@@ -658,8 +658,10 @@ def test_the_audit_log_error_message_contains_no_entry_content(tmp_path: Path) -
         )
 
     message = str(raised.value)
+    cause = raised.value.__cause__
     assert message == "1 audit sink failed"
-    assert raised.value.__cause__ is None
+    assert isinstance(cause, RuntimeError)
+    assert str(cause) == "tenant-marker"
     assert raised.value.__context__ is None
     assert "tenant-marker" not in message
     assert "owner-marker" not in message
@@ -710,6 +712,8 @@ def test_the_composite_raises_when_every_sink_raises() -> None:
 
     assert order == ["first", "second"]
     assert str(raised.value) == "2 audit sinks failed"
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value.__cause__) == "first"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")

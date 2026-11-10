@@ -13,9 +13,9 @@ Basis: a read-only inspection of GitHub `main` at commit `bb084e0` (2026-11-06) 
 A self-service tenant provisioning platform, built as a portfolio project.
 
 - Phase 1 (the catalog): a developer writes a YAML **manifest** (a list of `{type, name, options}` entries). The platform validates it against a **catalog** of vetted components, shows a cost estimate, and creates / updates / destroys a **tenant** with that stack. Guarantees: tagging, TTL expiry, zero-orphans teardown, single scoped identity, confirmation before destructive changes.
-- Phase 2 (the agent): a natural-language front door on Amazon Bedrock (Claude Sonnet 5) that maps requests like "billing service needs a table and a queue" onto catalog components and drives the same core operations through 11 tools, with confirmation enforced in code (single-use tokens), an audit log, a `chat` command and an MCP server.
+- Phase 2 (the agent): a natural-language front door on Amazon Bedrock (Claude Sonnet 5) that maps requests like "billing service needs a table and a queue" onto catalog components and drives the same core operations through 12 tools, with confirmation enforced in code (single-use tokens), an audit log, a `chat` command and an MCP server.
 
-**Honest status in one paragraph:** Phase 1 and Phase 2 are now 100% code-complete. The project runs as a local simulation with a real Bedrock adapter ready. The only remaining steps are external (deploying to a real AWS account and cleaning up legacy history).
+**Honest status in one paragraph:** Phase 1 and Phase 2 are code-complete for the local simulation. The Bedrock adapter and the CloudWatch Logs audit sink are wired and opt-in through environment variables. A live call still needs AWS credentials, a verified Bedrock model id, and a real executor. The current suite is 816 tests, 7,377 lines of application Python, and 19,595 lines of tests.
 
 Source of truth for scope: `docs/requirements.md` (13 requirements + 8 resolved decisions). It extends a base spec (`.kiro/specs/self-service-tenant-provisioning/`) that is **not in this repo**, so the base-spec CLI had to be built from scratch (`docs/open-questions.md`).
 
@@ -28,7 +28,7 @@ Out of scope per the spec: separate stack types (prod design must not be blocked
 Checked by cloning read-only and running the tools in a scratch copy:
 
 - `ruff check`: pass. `ruff format --check`: 59 files formatted. `mypy src`: no issues in 28 source files.
-- `pytest`: 650 passed, 2 failed. **The 2 failures are an artifact of the inspection environment** (it ran as root, so `chmod 0o500` on a parent directory does not block writes): `tests/cli/test_create_command.py::test_read_only_ssp_home_parent_cannot_be_written` and `tests/test_state_directory.py::test_create_state_directory_rejects_a_read_only_parent`. On the owner's machines (non-root) the suite was green at the last report. Do not "fix" these tests; run the suite as a normal user.
+- `pytest` at that inspection: 650 passed, 2 failed. **The 2 failures were an artifact of the inspection environment** (it ran as root, so `chmod 0o500` on a parent directory does not block writes): `tests/cli/test_create_command.py::test_read_only_ssp_home_parent_cannot_be_written` and `tests/test_state_directory.py::test_create_state_directory_rejects_a_read_only_parent`. On a normal user account the current tree collects 816 tests. Do not "fix" the permission tests by weakening them; run the suite as a normal user.
 - 71 tracked files. Working tree clean. Single branch `main`.
 - CI result of the newest commits (`bb084e0`, `5c2e45d`, `97efbea`) was **never confirmed by the owner**. Check the Actions page.
 
@@ -43,16 +43,16 @@ Checked by cloning read-only and running the tools in a scratch copy:
 | R5 | Cost | **Done structurally.** Per-component breakdown, "not priced" never counted as zero, POC-heuristic label. **All starter prices are `None`, so every real estimate says "not priced".** Currency/unit unspecified. |
 | R6 | Tagging and deletion guarantees | **Done for the simulation.** Required tags, delete-only deletion behaviour (the only enum value), teardown verification (zero tagged resources and no tenant role). 6.6 (empty S3 buckets before delete) is a real-executor concern; not applicable to the simulation. Not verified against real CloudFormation. |
 | R7 | Execution_Policy / Permissions_Boundary | **Partial, documents only.** `core/policy.py` builds both JSON documents; structural tests only; nothing applies them. **7.7 (PassRole restriction) is NOT implemented** because `iam:PermissionsBoundary` is not a valid condition key for `iam:PassRole` (the blanket deny covers PassRole, so a real deploy needing PassRole would fail). **7.9 not met** (there is no synthesized identity stack to test against). 7.8 not applicable yet. |
-| R8 | Backward compat / CLI | **Mostly done.** 8.1 not exercised (no code path produces a record without a manifest). 8.2 commands exist (`list` is an alias of `tenants`). 8.3 sweeper never selects prod. 8.4/8.5 hold (executor takes the validated manifest as data). **8.6 `status` shows the Manifest components as `name type` lines, catalog version and initiator, but not component options. Option printing is the in-progress work on the Mac (section 3.2).** |
-| R9 | Model access (Model_Client, Bedrock) | **Done.** Real Bedrock client added using Converse API. Real AWS credentials still needed for live calls, but the code is built and tested with a fake. |
+| R8 | Backward compat / CLI | **Mostly done.** 8.1 not exercised (no code path produces a record without a manifest). 8.2 commands exist (`list` is an alias of `tenants`). 8.3 sweeper never selects prod. 8.4/8.5 hold (executor takes the validated manifest as data). **8.6 `status` prints each component as `name type` and, when the component has options, indented `key: <json>` lines. Create, update, and destroy do not print options.** |
+| R9 | Model access (Model_Client, Bedrock) | **Done and opt-in.** `BedrockModelClient` calls the Converse API. `ssp chat` uses it when `SSP_BEDROCK_MODEL_ID` is set. `SSP_BEDROCK_REGION` defaults to `us-east-1`. Tests use a fake runtime and do not call AWS. The model id still has to be verified in the target account before a live call. |
 | R10 | The 11 agent tools | **Done.** 12 tools implemented due to plan/execute split for destroy. |
 | R11 | Confirmation in code | **Done.** Wired into service, CLI, and agent tools. |
 | R12 | `chat` command and MCP server | **Done.** CLI chat command and stdio MCP server implemented. |
-| R13 | Audit and attribution | **Done.** Fully wired into service, CLI, and agent. |
+| R13 | Audit and attribution | **Done.** Wired into the service, CLI, and agent. The JSON-lines file is always the local sink. CloudWatch Logs is opt-in through `SSP_AWS_REGION` and `SSP_LOG_GROUP`. |
 
 ### 2.2 Implemented (on GitHub)
 
-- CLI commands: `catalog`, `validate`, `estimate`, `diff`, `tenants` (alias `list`), `status`, `create`, `update`, `destroy`, `sweep`, and `--version`.
+- CLI commands: `catalog`, `validate`, `estimate`, `diff`, `tenants` (alias `list`), `status`, `create`, `update`, `destroy`, `sweep`, `chat`, and `--version`. `ssp-mcp` is the MCP entry point.
 - `create`: optional manifest, `--type dev|ephemeral|prod`, `--owner`, `--yes`; TTL dev 1 day, ephemeral 3 hours, prod none.
 - `update`: `--yes` confirms only the update; removals need `--confirm-removals`; each replacement needs `--confirm-replacement NAME`; interactive prompts when stdin is a terminal.
 - `destroy`: interactive confirmation requires typing the exact tenant id (case-sensitive); `--yes` skips it.
@@ -62,27 +62,26 @@ Checked by cloning read-only and running the tools in a scratch copy:
 - State directory: `SSP_HOME` (must be absolute) else `~/.ssp`; created with mode 0o700 on POSIX; first-run race fixed (`create_state_directory`).
 - Packaging: `uv build`, wheel-contents check, clean install smoke test in CI.
 - `agent/` package: twelve tools. `plan_destroy` and `execute_destroy` are separate. The tools call `PlatformService` only.
-- `chat` command: `run_chat` with an 8-completion limit. Confirmation stays in the CLI host. `ssp chat` reports that no model client is configured until a Bedrock client exists. Tests use `FakeModelClient`.
+- `chat` command: `run_chat` with an 8-completion limit. Confirmation stays in the CLI host. `ssp chat` uses Bedrock when `SSP_BEDROCK_MODEL_ID` is set, and otherwise exits 2 with `no model client is configured`. Tests use `FakeModelClient` or a fake Bedrock runtime.
 - MCP server: `ssp-mcp` speaks stdio JSON-RPC. A plan asks the client to confirm with `elicitation/create`.
 - Confirmation tokens are wired into `PlatformService`, the CLI (`create`, `update`, `destroy`, `sweep`), chat, and `ssp-mcp`.
-- Audit log is wired into the service, CLI, and agent. The JSON-lines sink is used. There is no real CloudWatch sink.
+- Audit log is wired into the service, CLI, and agent. The JSON-lines sink is always used for a successful execute or destroy. CloudWatch Logs is added to that flush when `SSP_AWS_REGION` and `SSP_LOG_GROUP` are set. An illegal region or log group name is refused before `boto3.client` runs.
 
 ### 2.3 Not implemented / planned / missing
 
-- Any real executor (AWS CDK/CloudFormation or Terraform). The word "AWS" in docs describes intent only.
+- Any real executor (AWS CDK/CloudFormation or Terraform). Provisioning is still the local simulation.
 - Real prices for components.
-- Bedrock client (R9.2). It needs a new dependency such as boto3 and an owner decision. Tests use `FakeModelClient`. The model id is still unverified.
-- Real CloudWatch audit sink (only a fake exists).
+- A verified Bedrock model id in the target account. The client is built. The id is still an environment variable, not a checked-in constant.
 - R2.3 naming limits, R7.7, R7.9, R1.5 completeness.
-- ADRs (2 to 3 were planned), LICENSE, demo, tag `v0.1.0`, repo still private.
+- Demo and tag `v0.1.0`. ADRs 0001–0003 and `LICENSE` are in the tree.
 
 ---
 
 ## 3. Work that is NOT on GitHub (verify with the owner first)
 
-### 3.2 R8.6 status options (MacBook, in progress)
+### 3.2 R8.6 status options
 
-- Approved plan: only the `status` command prints component options, as two-space-indented `key: <json>` lines sorted by key (keyword parameter, default False). Tests were being written; result not seen.
+- Done in this tree. Only `status` prints component options, as two-space-indented `key: <json>` lines sorted by key. Create, update, and destroy do not.
 - The Mac may also hold a branch named `backup/mac-apply-update`. **Never push it.**
 
 ---
@@ -94,13 +93,17 @@ Ports-and-adapters, enforced by AST tests in `tests/test_architecture.py`.
 ```
 src/self_service_platform/
   app.py            entry point (ssp = self_service_platform.app:app)
-  wiring.py         composition root: builds Catalog, Registry, Executor, PlatformService
+  wiring.py         composition root. The only module that imports boto3.
+  model/bedrock.py  Bedrock Converse client. Receives a client; does not import boto3.
+  audit/cloudwatch.py  CloudWatch Logs sink. Receives a client; does not import boto3.
+  mcp_main.py       ssp-mcp entry point
   statedir.py       SSP_HOME resolution, create_state_directory (stdlib + core only)
   catalog/          component.py (Component, AwsService, options), catalog.py (8 components)
   core/             manifest, validator, cost, diff, service (PlatformService), tenant,
                     registry (port), executor (port), tags, sweeper, policy,
-                    confirmation, confirmation_issuer
-  cli/main.py       Typer app, all commands (984 lines)
+                    confirmation, confirmation_issuer, model_client, audit
+  agent/            twelve tools, chat loop, MCP session
+  cli/main.py       Typer app, all commands
   executors/        local.py (SQLite simulation), fake.py (in-memory)
   registry/         sqlite.py
 tests/              mirrors the layout; plus test_architecture.py, test_examples.py, test_state_directory.py
@@ -108,7 +111,7 @@ examples/           valid / invalid / added / updated manifests
 ```
 
 Enforced import rules:
-- `core/`, `cli/`, `catalog/` must not import `wiring`, `app`, boto3, botocore, aws_cdk or sqlite3.
+- `core/`, `cli/`, `catalog/`, and `agent/` must not import boto3, botocore, or aws_cdk. Application code imports boto3 only from `wiring.py`. `core/` and `cli/` must not import sqlite3. `core/`, `cli/`, and `catalog/` must not import `wiring` or `app`.
 - `core/` and `cli/` must not import `executors` or `registry`.
 - `statedir.py` may import only stdlib and `core`.
 - `confirmation.py` must not import `confirmation_issuer` (verifier and issuer are separate objects).
@@ -206,7 +209,6 @@ Dependencies: pydantic, pyyaml, typer. Dev: hypothesis, mypy, pre-commit, pytest
 
 ## 9. Next steps (suggested order; the owner decides)
 
-1. Finish R8.6 (Mac).
-2. Real Bedrock client decision (R9.2).
-3. Real executor decision (R7.7/R7.9).
-4. Housekeeping (ADRs, LICENSE, go public).
+1. Verify the Bedrock model id in the target account before a live `ssp chat`.
+2. Real executor decision (R7.7/R7.9).
+3. Housekeeping (demo, tag `v0.1.0`, go public after history cleanup).

@@ -544,6 +544,8 @@ def _open_service(factory: Callable[[], PlatformService] | None) -> PlatformServ
     except SspHomeError as exc:
         typer.echo(f"SSP_HOME must be absolute: {exc.value}", err=True)
         raise typer.Exit(2) from None
+    except AuditLogError:
+        _reject_audit()
 
 
 def _require_valid_manifest(manifest: Manifest, catalog: Catalog) -> None:

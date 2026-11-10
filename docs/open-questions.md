@@ -178,7 +178,7 @@ The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm
 
 ## Audit log
 
-`plan_create`, `plan_update`, `plan_destroy`, `execute_create`, `execute_update`, and `destroy` write the audit log. `list_catalog`, `draft_manifest`, `validate_manifest`, `estimate`, `list_tenants`, and `tenant_status` write one entry when they are called. There is still no real CloudWatch sink, so 13.5 is half done. The fake CloudWatch sink is not wired.
+`plan_create`, `plan_update`, `plan_destroy`, `execute_create`, `execute_update`, and `destroy` write the audit log. `list_catalog`, `draft_manifest`, `validate_manifest`, `estimate`, `list_tenants`, and `tenant_status` write one entry when they are called. The JSON-lines file is the local sink. CloudWatch Logs is wired and opt-in: `SSP_AWS_REGION` and `SSP_LOG_GROUP` must both be set, the region must be an AWS region code, and the log group name must match CloudWatch's allowed characters (`A-Z`, `a-z`, `0-9`, and `.`, `-`, `_`, `/`, `#`, at most 512 characters). Plan, decline, refusal, and failed-attempt entries stay in the process until a successful execute or destroy, and that flush is what goes to both sinks. Requirement 13.5 is therefore opt-in, not an always-on dual write. `FakeCloudWatchLogs` remains the in-memory stand-in used by tests. The CLI exits 2 with `cannot write the audit log` and does not print the AWS error. The original exception is chained on `AuditLogError`.
 
 A failed audit write refuses to start execute or destroy. If the outcome write fails after the registry has already changed, the change is left in place and the error is raised. The CLI exits 2 with `cannot write the audit log`.
 
@@ -190,7 +190,7 @@ The allow-list stops secret argument keys, but an identity field that a caller f
 
 ## Model client
 
-The Model_Client protocol and `FakeModelClient` exist in `core/`. Twelve tools in `agent/` call `PlatformService`. The host confirms a plan and passes the token to `execute_create`, `execute_update`, or `execute_destroy`. `execute_destroy` is recorded as `destroy`. `chat` calls this protocol through `run_chat`. `ssp-mcp` speaks stdio JSON-RPC, and a plan asks the MCP client to confirm with `elicitation/create`. There is no Bedrock client. The Bedrock model id is still unverified, so requirement 9.2 is not started.
+The Model_Client protocol and `FakeModelClient` exist in `core/`. `BedrockModelClient` implements the protocol with the Converse API. `wiring.build_model_client` returns it when `SSP_BEDROCK_MODEL_ID` is set, and otherwise returns an empty fake. `SSP_BEDROCK_REGION` selects the region and defaults to `us-east-1`. An invalid region is refused before the client is created, and `ssp chat` then exits 1 with `invalid AWS region`. The exact Bedrock model id still has to be verified in the target account before a live call. Twelve tools in `agent/` call `PlatformService`. The host confirms a plan and passes the token to `execute_create`, `execute_update`, or `execute_destroy`. `execute_destroy` is recorded as `destroy`. `chat` calls this protocol through `run_chat`. `ssp-mcp` speaks stdio JSON-RPC, and a plan asks the MCP client to confirm with `elicitation/create`.
 
 ## Status options
 

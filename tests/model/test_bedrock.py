@@ -295,9 +295,9 @@ def test_wiring_uses_bedrock_only_when_the_model_id_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import boto3
-    from self_service_platform.model.bedrock import BedrockModelClient
 
     from self_service_platform.core.fake_model_client import FakeModelClient
+    from self_service_platform.model.bedrock import BedrockModelClient
     from self_service_platform.wiring import build_model_client
 
     calls: list[tuple[str, str]] = []
@@ -401,6 +401,100 @@ def test_chat_uses_bedrock_only_when_the_model_id_is_set(
     assert calls == [("bedrock-runtime", "us-east-1")]
     assert len(seen) == 1
     assert isinstance(seen[0], BedrockModelClient)
+
+
+def test_a_blocked_stop_reason_raises() -> None:
+    user = (_user("go"),)
+    for reason in ("content_filtered", "guardrail_intervened"):
+        runtime = FakeBedrockRuntime(
+            response=_message([{"text": "hidden"}], stop_reason=reason)
+        )
+        with pytest.raises(ModelClientError, match=r"^the model returned no answer$"):
+            _new_client(runtime).complete(user, ())
+        assert len(runtime.calls) == 1
+
+
+def test_an_empty_assistant_turn_is_refused_before_converse() -> None:
+    runtime = FakeBedrockRuntime(response=_text_response("unused"))
+    with pytest.raises(ModelClientError, match=r"^the model request failed$"):
+        _new_client(runtime).complete(
+            (ConversationMessage(role=MessageRole.ASSISTANT),),
+            (),
+        )
+    assert runtime.calls == []
+
+
+def test_a_tool_message_without_an_id_is_refused_before_converse() -> None:
+    runtime = FakeBedrockRuntime(response=_text_response("unused"))
+    with pytest.raises(ValueError, match="a tool message has text and a tool call id"):
+        ConversationMessage(role=MessageRole.TOOL, text="result")
+    assert runtime.calls == []
+
+
+def test_a_tool_use_without_an_id_raises() -> None:
+    with pytest.raises(ModelClientError, match=r"^the model returned no answer$"):
+        _complete(
+            _message(
+                [{"toolUse": {"name": "list_catalog", "input": {}}}],
+                stop_reason="tool_use",
+            )
+        )
+
+
+def test_wiring_rejects_an_invalid_region_before_creating_a_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import boto3
+
+    from self_service_platform.wiring import build_model_client
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_client(service_name: str, *, region_name: str) -> FakeBedrockRuntime:
+        calls.append((service_name, region_name))
+        return FakeBedrockRuntime()
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    monkeypatch.setenv("SSP_BEDROCK_MODEL_ID", _MODEL_ID)
+    monkeypatch.setenv("SSP_BEDROCK_REGION", "not-a-region")
+
+    with pytest.raises(ModelClientError, match=r"^invalid AWS region$") as raised:
+        build_model_client()
+
+    assert calls == []
+    assert str(raised.value.__cause__) == "invalid AWS region"
+    assert "not-a-region" not in str(raised.value)
+
+
+def test_chat_rejects_an_invalid_region_before_creating_a_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import boto3
+
+    from self_service_platform.app import app
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_client(service_name: str, *, region_name: str) -> FakeBedrockRuntime:
+        calls.append((service_name, region_name))
+        return FakeBedrockRuntime()
+
+    monkeypatch.setenv("SSP_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("SSP_AWS_REGION", raising=False)
+    monkeypatch.delenv("SSP_LOG_GROUP", raising=False)
+    monkeypatch.setenv("SSP_BEDROCK_MODEL_ID", _MODEL_ID)
+    monkeypatch.setenv("SSP_BEDROCK_REGION", "us-east-1;x")
+    monkeypatch.setattr(boto3, "client", fake_client)
+
+    refused = runner.invoke(app, ["chat"])
+
+    assert refused.exit_code == 1
+    assert refused.stderr == "invalid AWS region\n"
+    assert refused.stdout == ""
+    assert calls == []
+    assert "Traceback" not in refused.stderr
+    assert "us-east-1;x" not in refused.stderr
 
 
 def test_only_wiring_may_import_the_model_package() -> None:

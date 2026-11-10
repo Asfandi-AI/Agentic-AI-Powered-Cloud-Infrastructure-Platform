@@ -1,5 +1,6 @@
 """CloudWatch Logs audit sink. The constructor does not call AWS."""
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
@@ -8,7 +9,11 @@ from botocore.exceptions import ClientError
 from self_service_platform.core.audit import AuditEntry, audit_json
 
 _EXISTS = "ResourceAlreadyExistsException"
-_BAD_TOKEN = "InvalidSequenceTokenException"
+_RETRYABLE = frozenset(
+    {"InvalidSequenceTokenException", "DataAlreadyAcceptedException"}
+)
+_LOG_GROUP_NAME = re.compile(r"^[\.\-_/#A-Za-z0-9]{1,512}$")
+_INVALID_LOG_GROUP = "invalid CloudWatch log group name"
 
 
 class LogsClient(Protocol):
@@ -33,10 +38,24 @@ class LogsClient(Protocol):
     ) -> object: ...
 
 
+class InvalidLogGroupNameError(Exception):
+    """Raised when a log group name is not a CloudWatch log group name."""
+
+    def __init__(self) -> None:
+        super().__init__(_INVALID_LOG_GROUP)
+
+
+def require_log_group_name(name: str) -> None:
+    """Reject a name CloudWatch Logs would refuse. This does not call AWS."""
+    if _LOG_GROUP_NAME.fullmatch(name) is None:
+        raise InvalidLogGroupNameError
+
+
 class RealCloudWatchAuditLog:
     """Appends one JSON object to a CloudWatch Logs stream."""
 
     def __init__(self, client: LogsClient, log_group: str, log_stream: str) -> None:
+        require_log_group_name(log_group)
         self._client = client
         self.log_group = log_group
         self.log_stream = log_stream
@@ -74,7 +93,7 @@ def _put_event(
     try:
         _send(client, log_group, log_stream, events, sequence_token)
     except ClientError as exc:
-        if sequence_token is not None or _error_code(exc) != _BAD_TOKEN:
+        if sequence_token is not None or _error_code(exc) not in _RETRYABLE:
             raise
         token = _expected_token(exc)
         if token is None:
