@@ -1,10 +1,16 @@
 # Agentic-AI-Powered-Cloud-Infrastructure-Platform
 
-A manifest is a YAML list of catalog components. The platform validates that list against the catalog and prints a per-component cost estimate labeled as a POC heuristic. Starter component prices are unset, so a real estimate reports each of them as not priced.
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3120/)
+[![CI](https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform/actions/workflows/ci.yml)
+[![uv](https://img.shields.io/badge/uv-package%20manager-DE5FE9?logo=uv)](https://docs.astral.sh/uv/)
+
+## What this is
+
+A developer describes a tenant as a YAML manifest of catalog components. The platform validates that manifest, estimates cost, and creates, updates, and destroys the tenant in a local simulation. The same operations are exposed as 12 agent tools, through a Bedrock adapter for `ssp chat`, and through the `ssp-mcp` MCP server. Confirmation stays outside the model.
+
+[Architecture defense](docs/ARCHITECTURE_DEFENSE.md) · [Architecture decisions](docs/adr/)
 
 ## CI
-
-[![CI](https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform/actions/workflows/ci.yml)
 
 Push and pull requests to `main` run ruff, mypy, and pytest on Ubuntu and Windows.
 
@@ -36,7 +42,7 @@ sqs-queue sqs An SQS queue
 catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 ```
 
-The catalog_version value is a hash that changes whenever a component definition changes.
+`catalog_version` is a hash of the component definitions. It changes whenever a component definition changes, so a later run can print a different value than the transcripts below. Those transcripts use the current hash.
 
 ```text
 uv run ssp validate examples/valid-manifest.yaml
@@ -117,7 +123,7 @@ status: active
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
@@ -149,7 +155,7 @@ status: active
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: f09c038f8d5f67596e1ce70903ec402743ff79ec8d1d23a1905e2ad64ba1f8f5
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-11-05T10:42:50.787545+00:00
 last_error: -
 bucket s3-bucket
@@ -184,7 +190,7 @@ status: active
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
@@ -216,7 +222,7 @@ status: active
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
@@ -232,7 +238,7 @@ status: active
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
@@ -255,7 +261,7 @@ status: destroyed
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
@@ -279,7 +285,7 @@ status: destroyed
 tenant_type: dev
 owner: alice
 initiator: cli demo
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2026-10-24T09:09:57.758725+00:00
 last_error: -
 uploads s3-bucket
@@ -321,7 +327,7 @@ status: destroyed
 tenant_type: ephemeral
 owner: alice
 initiator: sweeper sweeper
-catalog_version: 38925d059c7b9c8a677bd163d1d05f61bf45784ab02d21f46304f1fa0f6219b6
+catalog_version: 6323c6d8dc8233b6ead14a88cd40667a3d0b90d6af74d6e1f56c4c547a0c175f
 expires_at: 2000-01-01T00:00:00+00:00
 last_error: -
 uploads s3-bucket
@@ -357,14 +363,9 @@ Built and usable from the CLI:
 
 The Execution_Policy and the Permissions_Boundary exist as policy documents built by `execution_policy` and `permissions_boundary` in `core/policy.py`. Structural tests check those documents. They are not verified against IAM, and nothing applies them.
 
-Not built yet:
+## Limitations
 
-- A Terraform executor or an AWS executor
-- An agent: twelve tools in `agent/` call `PlatformService`. The Model_Client interface and the fake exist in `core/`, and there is no Bedrock client
-- Confirmation tokens: `create`, `update`, `destroy`, `sweep`, `chat`, and `ssp-mcp` use the issuer and the verifier in `core/`
-- A Bedrock client for `chat`. The command exists, confirmation stays in the CLI, and `ssp chat` reports that no model client is configured
-- A Bedrock client for MCP. `ssp-mcp` exists, confirmation is an elicitation to the client, and there is no Bedrock client
-- An audit log: the JSON-lines sink is used by those commands, and there is no real CloudWatch sink
+Provisioning uses `LocalExecutor`, a local simulation. A real AWS executor is future work. Starter component prices are unset, so an estimate reports each of them as not priced. Real prices are future work.
 
 ## Development
 
@@ -374,10 +375,10 @@ uv run mypy src
 uv run pytest
 uv audit --locked
 uv build
-ssp --version
+uv run ssp --version
 ```
 
-CI runs ruff, mypy and pytest on Ubuntu and Windows, audits the locked dependencies, and builds and smoke-tests the package. `uv build` writes a wheel and a source distribution in `dist/` and does not publish them. `ssp --version` prints the installed package version and exits.
+CI runs ruff, mypy and pytest on Ubuntu and Windows, audits the locked dependencies, and builds and smoke-tests the package. `uv build` writes a wheel and a source distribution in `dist/` and does not publish them. `uv run ssp --version` prints the installed package version and exits.
 
 ## Architecture decisions
 

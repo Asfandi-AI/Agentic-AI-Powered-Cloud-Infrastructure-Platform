@@ -1,2 +1,1 @@
-def hello() -> str:
-    return "Hello from self-service-platform!"
+"""Self-service tenant provisioning platform."""
