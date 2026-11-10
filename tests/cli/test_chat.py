@@ -41,6 +41,8 @@ def _call(call_id: str, name: str, arguments: dict[str, object]) -> ModelRespons
 def ssp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "state"
     monkeypatch.setenv("SSP_HOME", str(home))
+    monkeypatch.delenv("SSP_BEDROCK_MODEL_ID", raising=False)
+    monkeypatch.delenv("SSP_BEDROCK_REGION", raising=False)
     return home
 
 
@@ -138,6 +140,51 @@ def test_chat_confirms_a_create_and_hides_the_token(
         assert sqlite.get(TENANT_ID).status is TenantStatus.ACTIVE
         assert seen[0].kind is InitiatorKind.AGENT
         assert seen[0].owner == "owner"
+
+
+def test_chat_with_a_bedrock_model_id_uses_the_real_client(
+    ssp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import boto3
+    from self_service_platform.model.bedrock import BedrockModelClient
+
+    calls: list[tuple[str, str]] = []
+    seen: list[tuple[object, object]] = []
+
+    def fake_client(service_name: str, *, region_name: str) -> object:
+        calls.append((service_name, region_name))
+        return object()
+
+    def capture(
+        service: object,
+        client: object,
+        initiator: object,
+        host: object,
+    ) -> None:
+        del service, host
+        seen.append((client, initiator))
+
+    monkeypatch.setattr(boto3, "client", fake_client)
+    monkeypatch.setattr("self_service_platform.wiring.run_chat", capture)
+    monkeypatch.delenv("SSP_AWS_REGION", raising=False)
+    monkeypatch.delenv("SSP_LOG_GROUP", raising=False)
+    monkeypatch.setenv("SSP_BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5")
+    _user(monkeypatch, "owner")
+
+    result = runner.invoke(app, ["chat"], input="hello\n")
+
+    assert result.exit_code == 0
+    assert calls == [("bedrock-runtime", "us-east-1")]
+    assert len(seen) == 1
+    client, initiator = seen[0]
+    assert isinstance(client, BedrockModelClient)
+    assert client.model_id == "us.anthropic.claude-sonnet-5"
+    assert client.region == "us-east-1"
+    assert isinstance(initiator, Initiator)
+    assert initiator.kind is InitiatorKind.AGENT
+    assert initiator.owner == "owner"
+    assert not ssp_home.exists()
 
 
 class _MemoryAudit:

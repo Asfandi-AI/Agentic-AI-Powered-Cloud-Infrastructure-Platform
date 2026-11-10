@@ -7,6 +7,7 @@ from typing import TypeVar, cast
 
 import boto3
 
+from self_service_platform.agent.loop import run_chat
 from self_service_platform.audit.cloudwatch import LogsClient, RealCloudWatchAuditLog
 from self_service_platform.catalog.catalog import build_catalog
 from self_service_platform.core.audit import (
@@ -16,10 +17,14 @@ from self_service_platform.core.audit import (
     ToolName,
 )
 from self_service_platform.core.audit_file import JsonLinesAuditLog
+from self_service_platform.core.chat_host import ChatHost
 from self_service_platform.core.confirmation_issuer import confirmation_pair
+from self_service_platform.core.fake_model_client import FakeModelClient
+from self_service_platform.core.model_client import ModelClient
 from self_service_platform.core.registry import Clock, Registry
 from self_service_platform.core.service import PlatformService, TtlPolicy
 from self_service_platform.core.tenant import (
+    Initiator,
     RegistryUnavailableError,
     SspHomeError,
     TenantNotFoundError,
@@ -28,12 +33,14 @@ from self_service_platform.core.tenant import (
     TransitionFields,
 )
 from self_service_platform.executors.local import LocalExecutor
+from self_service_platform.model.bedrock import BedrockModelClient, BedrockRuntimeClient
 from self_service_platform.registry.sqlite import SqliteRegistry
 from self_service_platform.statedir import create_state_directory
 
 _DATABASE_NAME = "tenants.sqlite"
 _EXECUTOR_DATABASE_NAME = "local-executor.sqlite"
 _LOG_STREAM = "ssp-audit-log"
+_DEFAULT_BEDROCK_REGION = "us-east-1"
 # POC defaults. Not from the spec.
 _DEV_TTL = timedelta(days=1)
 _EPHEMERAL_TTL = timedelta(hours=3)
@@ -177,6 +184,31 @@ def _setting(name: str) -> str | None:
     if text == "":
         return None
     return text
+
+
+def build_model_client() -> FakeModelClient | BedrockModelClient:
+    """Return Bedrock when SSP_BEDROCK_MODEL_ID is set, otherwise an empty fake."""
+    model_id = _setting("SSP_BEDROCK_MODEL_ID")
+    if model_id is None:
+        return FakeModelClient(())
+    region = _setting("SSP_BEDROCK_REGION")
+    if region is None:
+        region = _DEFAULT_BEDROCK_REGION
+    runtime = cast(
+        BedrockRuntimeClient,
+        boto3.client("bedrock-runtime", region_name=region),
+    )
+    return BedrockModelClient(runtime, model_id=model_id, region=region)
+
+
+def run_configured_chat(
+    service: PlatformService,
+    client: ModelClient,
+    initiator: Initiator,
+    host: ChatHost,
+) -> None:
+    """Run one chat session with the client chosen for this process."""
+    run_chat(service, client, initiator, host)
 
 
 def _audit_sink(directory: Path) -> JsonLinesAuditLog | CompositeAuditLog:

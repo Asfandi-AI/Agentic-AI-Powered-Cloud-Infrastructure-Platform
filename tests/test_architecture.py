@@ -526,3 +526,66 @@ def test_a_cli_import_of_the_audit_package_is_rejected() -> None:
             "import self_service_platform.audit.cloudwatch"
         )
     ]
+
+
+_MODEL_PACKAGE = ("self_service_platform.model",)
+
+
+def _model_import_allowed(path: Path) -> bool:
+    relative = path.relative_to(_PACKAGE)
+    if relative.as_posix() == "wiring.py":
+        return True
+    return relative.parts[0] == "model"
+
+
+def _model_import_violations(paths: list[Path] | None = None) -> list[str]:
+    chosen = _python_files(_PACKAGE) if paths is None else paths
+    found: list[str] = []
+    for path in chosen:
+        if _model_import_allowed(path):
+            continue
+        relative = path.relative_to(_ROOT).as_posix()
+        for statement in _import_statements(path):
+            names = _imported_names(statement)
+            if any(_is_named_module(name, _MODEL_PACKAGE) for name in names):
+                found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_only_wiring_imports_the_model_package() -> None:
+    assert _model_import_violations() == []
+
+
+def test_a_core_import_of_the_model_package_is_rejected() -> None:
+    probe = _PACKAGE / "core" / "_architecture_model.py"
+    probe.write_text("import self_service_platform.model\n", encoding="utf-8")
+    try:
+        violations = _model_import_violations([probe])
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/core/_architecture_model.py: "
+            "import self_service_platform.model"
+        )
+    ]
+
+
+def test_a_cli_import_of_the_model_package_is_rejected() -> None:
+    probe = _PACKAGE / "cli" / "_architecture_model.py"
+    probe.write_text(
+        "import self_service_platform.model.bedrock\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _model_import_violations([probe])
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/cli/_architecture_model.py: "
+            "import self_service_platform.model.bedrock"
+        )
+    ]
