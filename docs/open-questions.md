@@ -192,6 +192,10 @@ The allow-list stops secret argument keys, but an identity field that a caller f
 
 The Model_Client protocol and `FakeModelClient` exist in `core/`. Twelve tools in `agent/` call `PlatformService`. The host confirms a plan and passes the token to `execute_create`, `execute_update`, or `execute_destroy`. `execute_destroy` is recorded as `destroy`. `chat` calls this protocol through `run_chat`. `ssp-mcp` speaks stdio JSON-RPC, and a plan asks the MCP client to confirm with `elicitation/create`. There is no Bedrock client. The Bedrock model id is still unverified, so requirement 9.2 is not started.
 
+## Status options
+
+`status` prints each entry's options as JSON, one indented line per option; real catalog components have no options today, so real output is unchanged; create, update, and destroy do not print options.
+
 ## Decided
 
 Error text is truncated to 1024 characters (`ERROR_TEXT_LIMIT`).

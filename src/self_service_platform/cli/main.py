@@ -1,5 +1,6 @@
 import getpass
 import importlib.metadata
+import json
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -155,7 +156,7 @@ def create_app(
             record = _load_tenant(registry, tenant_id)
         finally:
             _close_opened(registry)
-        _echo_status(record)
+        _echo_status(record, show_options=True)
 
     @app.command("create")
     def create_command(
@@ -425,12 +426,14 @@ def _tenant_line(record: TenantRecord) -> str:
     )
 
 
-def _echo_status(record: TenantRecord) -> None:
-    for line in _status_lines(record):
+def _echo_status(record: TenantRecord, *, show_options: bool = False) -> None:
+    for line in _status_lines(record, show_options=show_options):
         typer.echo(line)
 
 
-def _status_lines(record: TenantRecord) -> tuple[str, ...]:
+def _status_lines(
+    record: TenantRecord, *, show_options: bool = False
+) -> tuple[str, ...]:
     initiator = record.initiator
     lines = [
         f"status: {_escape_stored(record.status.value)}",
@@ -444,11 +447,21 @@ def _status_lines(record: TenantRecord) -> tuple[str, ...]:
         f"expires_at: {_expires(record.expires_at)}",
         f"last_error: {_error(record.last_error)}",
     ]
-    components = tuple(
-        f"{_escape_stored(entry.name)} {_escape_stored(entry.type)}"
-        for entry in record.manifest
-    )
-    return tuple(lines) + components
+    components: list[str] = []
+    for entry in record.manifest:
+        components.append(f"{_escape_stored(entry.name)} {_escape_stored(entry.type)}")
+        if show_options:
+            components.extend(_option_lines(entry.options))
+    return tuple(lines) + tuple(components)
+
+
+def _option_lines(options: dict[str, object]) -> tuple[str, ...]:
+    return tuple(_option_line(key, value) for key, value in sorted(options.items()))
+
+
+def _option_line(key: str, value: object) -> str:
+    rendered = json.dumps(value, ensure_ascii=True, sort_keys=True)
+    return f"  {_escape_stored(key)}: {rendered}"
 
 
 def _expires(value: datetime | None) -> str:
