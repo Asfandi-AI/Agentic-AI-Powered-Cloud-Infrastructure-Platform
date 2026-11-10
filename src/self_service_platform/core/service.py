@@ -6,6 +6,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from self_service_platform.catalog.catalog import Catalog
+from self_service_platform.catalog.component import Component
 from self_service_platform.core.audit import (
     AuditEntry,
     AuditLog,
@@ -29,6 +30,7 @@ from self_service_platform.core.registry import Clock, Registry
 from self_service_platform.core.tenant import (
     Initiator,
     InitiatorKind,
+    TenantNotFoundError,
     TenantRecord,
     TenantStatus,
     TenantType,
@@ -429,16 +431,125 @@ class PlatformService:
         """Return the stored status without closing the registry."""
         return self._registry.get(tenant_id).status
 
-    def plan_destroy(self, tenant_id: str) -> DestroyPlan:
-        record = self._registry.get(tenant_id)
-        _require_destroyable(record.status)
-        return DestroyPlan(
+    def list_catalog(
+        self, initiator: Initiator | None = None
+    ) -> tuple[tuple[Component, ...], str]:
+        """Return the catalog components and version, and record the call."""
+        actor = _actor(initiator)
+        components = self._catalog.list_components()
+        version = self._catalog.catalog_version
+        self._tool(
+            actor,
+            ToolName.LIST_CATALOG,
+            None,
+            Outcome.SUCCEEDED,
+            _arguments(catalog_version=version),
+        )
+        return components, version
+
+    def draft_manifest(
+        self, manifest: Manifest, initiator: Initiator | None = None
+    ) -> ValidatedManifest:
+        """Validate a draft with the catalog rules and record the call."""
+        return self._check_manifest(ToolName.DRAFT_MANIFEST, manifest, initiator)
+
+    def validate_manifest(
+        self, manifest: Manifest, initiator: Initiator | None = None
+    ) -> ValidatedManifest:
+        """Validate a manifest with the catalog rules and record the call."""
+        return self._check_manifest(ToolName.VALIDATE_MANIFEST, manifest, initiator)
+
+    def estimate(
+        self, manifest: Manifest, initiator: Initiator | None = None
+    ) -> EstimatedCost:
+        """Estimate a manifest and record the call. Missing prices stay unset."""
+        actor = _actor(initiator)
+        try:
+            validated = validate_manifest(manifest, self._catalog)
+        except ManifestValidationError:
+            self._tool(actor, ToolName.ESTIMATE, None, Outcome.REFUSED, _arguments())
+            raise
+        cost = estimate_cost(validated)
+        self._tool(
+            actor,
+            ToolName.ESTIMATE,
+            None,
+            Outcome.SUCCEEDED,
+            _arguments(
+                catalog_version=validated.catalog_version,
+                manifest_entry_count=len(validated.entries),
+            ),
+        )
+        return cost
+
+    def list_tenants(
+        self, initiator: Initiator | None = None
+    ) -> tuple[TenantRecord, ...]:
+        """Return every stored tenant and record the call."""
+        actor = _actor(initiator)
+        records = self._registry.list_tenants()
+        self._tool(actor, ToolName.LIST_TENANTS, None, Outcome.SUCCEEDED, _arguments())
+        return records
+
+    def tenant_status(
+        self, tenant_id: str, initiator: Initiator | None = None
+    ) -> TenantRecord:
+        """Return the stored tenant record and record the call."""
+        actor = _actor(initiator)
+        try:
+            record = self._registry.get(tenant_id)
+        except TenantNotFoundError:
+            self._tool(
+                actor,
+                ToolName.TENANT_STATUS,
+                tenant_id,
+                Outcome.REFUSED,
+                _arguments(),
+            )
+            raise
+        self._tool(
+            actor,
+            ToolName.TENANT_STATUS,
+            tenant_id,
+            Outcome.SUCCEEDED,
+            _arguments(
+                catalog_version=record.catalog_version,
+                manifest_entry_count=len(record.manifest),
+            ),
+        )
+        return record
+
+    def plan_destroy(
+        self, tenant_id: str, initiator: Initiator | None = None
+    ) -> DestroyPlan:
+        actor = _actor(initiator)
+        try:
+            record = self._registry.get(tenant_id)
+            _require_destroyable(record.status)
+        except (TenantNotFoundError, DestroyNotAllowedError):
+            self._tool(
+                actor,
+                ToolName.PLAN_DESTROY,
+                tenant_id,
+                Outcome.REFUSED,
+                _arguments(),
+            )
+            raise
+        plan = DestroyPlan(
             tenant_id=record.tenant_id,
             tenant_type=record.tenant_type,
             component_names=tuple(entry.name for entry in record.manifest),
             status=record.status,
             statement=_DESTROY_STATEMENT,
         )
+        self._tool(
+            actor,
+            ToolName.PLAN_DESTROY,
+            tenant_id,
+            Outcome.SUCCEEDED,
+            _arguments(manifest_entry_count=len(plan.component_names)),
+        )
+        return plan
 
     def apply_destroy(
         self,
@@ -525,6 +636,30 @@ class PlatformService:
         except Exception:
             refused()
             raise
+
+    def _check_manifest(
+        self,
+        tool: ToolName,
+        manifest: Manifest,
+        initiator: Initiator | None,
+    ) -> ValidatedManifest:
+        actor = _actor(initiator)
+        try:
+            validated = validate_manifest(manifest, self._catalog)
+        except ManifestValidationError:
+            self._tool(actor, tool, None, Outcome.REFUSED, _arguments())
+            raise
+        self._tool(
+            actor,
+            tool,
+            None,
+            Outcome.SUCCEEDED,
+            _arguments(
+                catalog_version=validated.catalog_version,
+                manifest_entry_count=len(validated.entries),
+            ),
+        )
+        return validated
 
     def _tool(
         self,

@@ -178,7 +178,7 @@ The CloudFormation action list, the SSM action list (`ssm:GetParameter` and `ssm
 
 ## Audit log
 
-`plan_create`, `plan_update`, `execute_create`, `execute_update`, and `destroy` write the audit log. `list_catalog`, `draft_manifest`, `validate_manifest`, `estimate`, `list_tenants`, and `tenant_status` do not. There is still no real CloudWatch sink, so 13.5 is half done. The fake CloudWatch sink is not wired.
+`plan_create`, `plan_update`, `plan_destroy`, `execute_create`, `execute_update`, and `destroy` write the audit log. `list_catalog`, `draft_manifest`, `validate_manifest`, `estimate`, `list_tenants`, and `tenant_status` write one entry when they are called. There is still no real CloudWatch sink, so 13.5 is half done. The fake CloudWatch sink is not wired.
 
 A failed audit write refuses to start execute or destroy. If the outcome write fails after the registry has already changed, the change is left in place and the error is raised. The CLI exits 2 with `cannot write the audit log`.
 
@@ -190,7 +190,7 @@ The allow-list stops secret argument keys, but an identity field that a caller f
 
 ## Model client
 
-The Model_Client protocol and `FakeModelClient` exist in `core/`. The Agent does not call them yet. There is no Bedrock client. The Bedrock model id is still unverified, so requirement 9.2 is not started.
+The Model_Client protocol and `FakeModelClient` exist in `core/`. Twelve tools in `agent/` call `PlatformService`. The host confirms a plan and passes the token to `execute_create`, `execute_update`, or `execute_destroy`. `execute_destroy` is recorded as `destroy`. The tools do not call the model yet. There is no Bedrock client. The Bedrock model id is still unverified, so requirement 9.2 is not started.
 
 ## Decided
 

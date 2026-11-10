@@ -360,7 +360,7 @@ The Execution_Policy and the Permissions_Boundary exist as policy documents buil
 Not built yet:
 
 - A Terraform executor or an AWS executor
-- An agent: the Model_Client interface and the fake exist in `core/`, and there is no Bedrock client
+- An agent: twelve tools in `agent/` call `PlatformService`. The Model_Client interface and the fake exist in `core/`, and there is no Bedrock client
 - Confirmation tokens: `create`, `update`, `destroy`, and `sweep` use the issuer and the verifier in `core/`. An agent does not
 - A `chat` command
 - An MCP server

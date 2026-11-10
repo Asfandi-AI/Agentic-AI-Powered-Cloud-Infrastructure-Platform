@@ -39,6 +39,7 @@ class ToolName(StrEnum):
     EXECUTE_UPDATE = "execute_update"
     LIST_TENANTS = "list_tenants"
     TENANT_STATUS = "tenant_status"
+    PLAN_DESTROY = "plan_destroy"
     DESTROY = "destroy"
 
 

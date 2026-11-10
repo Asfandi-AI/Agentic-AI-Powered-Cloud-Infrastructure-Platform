@@ -385,3 +385,81 @@ def test_confirmation_import_of_the_issuer_is_rejected() -> None:
             "import self_service_platform.core.confirmation_issuer"
         )
     ]
+
+
+_AGENT_MODULES = frozenset({"boto3", "botocore", "aws_cdk"})
+_AGENT_PREFIXES = (
+    "self_service_platform.executors",
+    "self_service_platform.registry",
+)
+_AGENT_PACKAGE = ("self_service_platform.agent",)
+
+
+def _agent_import_violations(paths: list[Path]) -> list[str]:
+    found: list[str] = []
+    for path in paths:
+        relative = path.relative_to(_ROOT).as_posix()
+        for statement in _import_statements(path):
+            names = _imported_names(statement)
+            if any(_is_named_module(name, _AGENT_PACKAGE) for name in names):
+                found.append(f"{relative}: {statement}")
+    return found
+
+
+def test_agent_imports_stay_inside_its_boundary() -> None:
+    assert _violations(_PACKAGE / "agent", _AGENT_MODULES, _AGENT_PREFIXES) == []
+
+
+def test_an_agent_import_of_a_cloud_sdk_or_adapter_is_rejected() -> None:
+    directory = _PACKAGE / "agent"
+    created = not directory.exists()
+    directory.mkdir(exist_ok=True)
+    probe = directory / "_architecture_probe.py"
+    probe.write_text(
+        "import boto3\n"
+        "import self_service_platform.executors\n"
+        "import self_service_platform.registry\n",
+        encoding="utf-8",
+    )
+    try:
+        violations = _violations(directory, _AGENT_MODULES, _AGENT_PREFIXES)
+    finally:
+        probe.unlink(missing_ok=True)
+        if created:
+            directory.rmdir()
+
+    assert violations == [
+        "src/self_service_platform/agent/_architecture_probe.py: import boto3",
+        (
+            "src/self_service_platform/agent/_architecture_probe.py: "
+            "import self_service_platform.executors"
+        ),
+        (
+            "src/self_service_platform/agent/_architecture_probe.py: "
+            "import self_service_platform.registry"
+        ),
+    ]
+
+
+def test_core_and_cli_do_not_import_the_agent_package() -> None:
+    paths = [
+        *_python_files(_PACKAGE / "core"),
+        *_python_files(_PACKAGE / "cli"),
+    ]
+    assert _agent_import_violations(paths) == []
+
+
+def test_a_core_import_of_the_agent_package_is_rejected() -> None:
+    probe = _PACKAGE / "core" / "_architecture_agent.py"
+    probe.write_text("import self_service_platform.agent\n", encoding="utf-8")
+    try:
+        violations = _agent_import_violations([probe])
+    finally:
+        probe.unlink(missing_ok=True)
+
+    assert violations == [
+        (
+            "src/self_service_platform/core/_architecture_agent.py: "
+            "import self_service_platform.agent"
+        )
+    ]
