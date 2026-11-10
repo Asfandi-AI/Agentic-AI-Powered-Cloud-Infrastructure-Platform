@@ -8,6 +8,8 @@
 
 A developer describes a tenant as a YAML manifest of catalog components. The platform validates that manifest, estimates cost, and creates, updates, and destroys the tenant in a local simulation. The same operations are exposed as 12 agent tools, through a Bedrock adapter for `ssp chat`, and through the `ssp-mcp` MCP server. Confirmation stays outside the model.
 
+This project is strictly tested with **816 tests**, `mypy` (including strict mode), and zero external cloud dependencies during local runs.
+
 [Architecture defense](docs/ARCHITECTURE_DEFENSE.md) · [Architecture decisions](docs/adr/)
 
 ## CI
@@ -131,11 +133,11 @@ jobs sqs-queue
 ```
 
 ```text
-uv run ssp create demo --type dev --owner alice --yes
+uv run ssp create demo-default --type dev --owner alice --yes
 ```
 
 ```text
-tenant_id: demo
+tenant_id: demo-default
 tenant_type: dev
 owner: alice
 bucket s3-bucket
@@ -150,7 +152,7 @@ logs log-group
 manifest total: not priced
 POC heuristic
 expires_at: 2026-11-05T10:42:50.787545+00:00
-created: demo status active
+created: demo-default status active
 status: active
 tenant_type: dev
 owner: alice
