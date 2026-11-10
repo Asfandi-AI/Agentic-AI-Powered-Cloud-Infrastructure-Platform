@@ -1,10 +1,10 @@
-# Self-Service Platform
+# Agentic-AI-Powered-Cloud-Infrastructure-Platform
 
 A manifest is a YAML list of catalog components. The platform validates that list against the catalog and prints a per-component cost estimate labeled as a POC heuristic. Starter component prices are unset, so a real estimate reports each of them as not priced.
 
 ## CI
 
-[![CI](https://github.com/Asfandi-AI/Self-Service-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Asfandi-AI/Self-Service-Platform/actions/workflows/ci.yml)
+[![CI](https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform/actions/workflows/ci.yml)
 
 Push and pull requests to `main` run ruff, mypy, and pytest on Ubuntu and Windows.
 
@@ -15,8 +15,8 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 The commands below are the same on Windows PowerShell and bash.
 
 ```text
-git clone https://github.com/Asfandi-AI/Self-Service-Platform.git
-cd Self-Service-Platform
+git clone https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform.git
+cd Agentic-AI-Powered-Cloud-Infrastructure-Platform
 uv sync
 ```
 

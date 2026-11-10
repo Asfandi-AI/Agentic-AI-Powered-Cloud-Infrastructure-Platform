@@ -1,6 +1,6 @@
 # Architecture Defense
 
-This document explains the design of the self-service platform for a technical reader. The implementation is a local simulation. The structure is the one a production control plane needs before a real executor or a real model client is attached.
+This document explains the design of the Agentic-AI-Powered-Cloud-Infrastructure-Platform for a technical reader. The implementation is a local simulation. The structure is the one a production control plane needs before a real executor or a real model client is attached.
 
 ## Executive Summary
 

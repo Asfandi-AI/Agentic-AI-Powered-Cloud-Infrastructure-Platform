@@ -1,6 +1,6 @@
-# PROJECT_HANDOVER.md
+# Agentic-AI-Powered-Cloud-Infrastructure-Platform
 
-Project: Agentic AI-Powered Cloud Infrastructure Platform (repo: Asfandi-AI/Self-Service-Platform, CLI: `ssp`)
+Project: Agentic-AI-Powered-Cloud-Infrastructure-Platform (repo: Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform, CLI: `ssp`)
 Handover written: 2026-11-10
 Basis: a read-only inspection of GitHub `main` at commit `bb084e0` (2026-11-06) plus the facts from the working sessions that are NOT on GitHub (section 3).
 
@@ -155,8 +155,8 @@ All from `docs/open-questions.md` unless noted:
 Prerequisites: Python 3.12, [uv](https://docs.astral.sh/uv/).
 
 ```
-git clone https://github.com/Asfandi-AI/Self-Service-Platform.git
-cd Self-Service-Platform
+git clone https://github.com/Asfandi-AI/Agentic-AI-Powered-Cloud-Infrastructure-Platform.git
+cd Agentic-AI-Powered-Cloud-Infrastructure-Platform
 uv sync --locked
 uv run ssp catalog
 uv run ssp validate examples/valid-manifest.yaml

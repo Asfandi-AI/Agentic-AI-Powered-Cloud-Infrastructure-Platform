@@ -1,4 +1,4 @@
-# Self-Service Platform - rules for AI assistants
+# Agentic-AI-Powered-Cloud-Infrastructure-Platform - rules for AI assistants
 
 Project spec: docs/requirements.md. Read it before any task.
 

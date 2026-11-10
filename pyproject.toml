@@ -1,7 +1,7 @@
 [project]
 name = "self-service-platform"
 version = "0.1.0"
-description = "Self-service infrastructure platform (local simulation): validate a YAML manifest, estimate cost, create, update and destroy tenants."
+description = "An Agentic AI-Powered Cloud Infrastructure Platform for self-service tenant provisioning."
 readme = "README.md"
 requires-python = ">=3.12"
 classifiers = [
