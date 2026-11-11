@@ -147,6 +147,7 @@ def test_chat_with_a_bedrock_model_id_uses_the_real_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import boto3
+
     from self_service_platform.model.bedrock import BedrockModelClient
 
     calls: list[tuple[str, str]] = []
