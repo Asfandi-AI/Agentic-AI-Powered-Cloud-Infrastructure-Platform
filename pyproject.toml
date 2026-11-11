@@ -1,7 +1,7 @@
 [project]
 name = "self-service-platform"
 version = "0.1.0"
-description = "An Agentic AI-Powered Cloud Infrastructure Platform for self-service tenant provisioning."
+description = "Local control plane for self-service tenant provisioning: validate a manifest, estimate cost, and create, update, or destroy the tenant, with opt-in Bedrock and CloudWatch adapters."
 readme = "README.md"
 requires-python = ">=3.12"
 classifiers = [
